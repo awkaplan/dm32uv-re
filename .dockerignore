@@ -1,0 +1,17 @@
+# Build context is dm32uv-re/ itself (see docker/docker-compose.yml's build.context: ".."), so
+# this lives at the repo root next to .gitignore, not under docker/. Mirrors .gitignore's
+# machine-specific tools/ state: COPY doesn't respect .gitignore, so without this the image would
+# bake in the HOST's Ghidra project (tools/ghidra_project/), tied to the host user's identity in
+# Ghidra's own project-ownership tracking, and crash every container run with
+# ghidra.util.NotOwnerException ("Project is owned by <host user>") since the container is a
+# different "owner". The image builds its own copies of all three at build time instead
+# (Dockerfile's setup.sh step) - see docker-compose.yml's comment for why those three specifically
+# are never bind-mounted from the host either.
+tools/.venv/
+tools/ghidra_project/
+tools/.env.ghidra
+**/__pycache__/
+.git
+# Live radio captures are per-unit data and must never be baked into an image (see
+# docs/live-ram-capture.md); the directory is gitignored for the same reason.
+data/firmware/live-captures/

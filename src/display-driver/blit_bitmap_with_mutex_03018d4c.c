@@ -1,0 +1,56 @@
+/*
+ * Decompiler reconstruction for interoperability research; not Baofeng source code.
+ * Source binary: DM32.00.01.048.bin (app region, file offset 0x1000+)
+ *   SHA-256: 0791558d1471415556bcea941e161cd695937edd41b7e8ed38a18bdca2556147
+ * Function: blit_bitmap_with_mutex @ 03018d4c (file base 0x03000000; code starts at 0x03001000)
+ * Size: 124 bytes
+ * Confidence: STRUCTURAL (inferred from code shape and call context; plausible but unverified)
+ */
+
+
+/* Subsystem: display-driver
+ * Confidence: STRUCTURAL - inferred from code shape and call context; plausible but unverified.
+ *
+ * GENERATED FILE - do not edit; regenerate from the source project.
+ */
+#include "dm32/dm32.h"
+
+/* Confidence: STRUCTURAL - inferred from code shape and call context; plausible but unverified. */
+
+void blit_bitmap_with_mutex(uint param_1,int param_2__w,uint param_3,int param_4,int param_5__w)
+
+{
+  short param_2 = (short)param_2__w;
+  undefined2 param_5 = (undefined2)param_5__w;
+  byte bVar1;
+  uint uVar2;
+  uint uVar3;
+  uint uVar4;
+  
+  param_3 = param_3 & 0xff;
+  os_sem_pend_ms(p_ucos_mutex_00039344,0);
+  if (param_3 != 0) {
+    uVar3 = 0;
+    uVar4 = 0;
+    do {
+      bVar1 = *(byte *)(param_4 + uVar4);
+      uVar2 = 7;
+      do {
+        if (((int)(uint)bVar1 >> (uVar2 & 0x3f) & 1U) != 0) {
+          display_plot_pixel(uVar3 + (param_1 & 0xffff) & 0xffff,param_2,param_5);
+        }
+        uVar3 = uVar3 + 1 & 0xff;
+        if (param_3 <= uVar3) {
+          param_2 = param_2 + 1;
+          uVar3 = 0;
+          break;
+        }
+        uVar2 = uVar2 - 1;
+      } while (uVar2 != 0xffffffff);
+      uVar4 = uVar4 + 1 & 0xff;
+    } while (uVar4 < param_3 * 2);
+  }
+  os_sem_post(p_ucos_mutex_00039344);
+  return;
+}
+

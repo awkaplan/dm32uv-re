@@ -1,0 +1,588 @@
+// rda5807m.rdl - RDA5807M broadcast-FM tuner, 16-bit registers 00H-0FH.
+//
+// BUS. 2-wire I2C, bit-banged by the SoC on GPIOA pin 0x19 (SDIO) and 0x1A (SCLK). 7-bit chip
+// address 0010000b, so the command byte is 0x20 (write) / 0x21 (read) (RDA5807M v1.0, 2.5, p.5).
+// THERE IS NO REGISTER ADDRESS ON THE WIRE: a write transfer always starts at register 02H and a
+// read transfer always starts at register 0AH; an internal counter then auto-increments, each
+// register going high byte first (2.5, p.5). The datasheet says the counter wraps from 3AH back
+// to 00H. So the byte address of a register here is 2 x its number (an ordering, nothing more),
+// and `wire_addr` is the register's position in that counter. To change register N you must
+// rewrite every register from 02H up to N; that is why the stock driver keeps a RAM shadow of
+// 02H-05H (tools/include/rda5807m_shadow.h).
+//
+// SOURCES.
+//   [DS] RDA5807M "Single-Chip Broadcast FM Radio Tuner" Rev 1.0, May 2011, RDA Microelectronics,
+//        23 pages: 2.4-2.5 control interface p.5; 6 Register Definition p.9-13.
+//   [FW] stock DM32.00.01.048, the RDA5807M driver at 0x03065444-0x030658eb (the corpus gives
+//        these functions placeholder names such as peripheral_reset_*; the names used here are
+//        what the code does, traced by disassembly):
+//          0x03065444 I2C START          0x03065484 I2C STOP          0x030654d8 ACK slot (SDA high,
+//          one SCL pulse, ACK never sampled)                          0x03065514 master ACK (SDA low)
+//          0x03065548 send byte, MSB first, then the ACK slot          0x030655ac receive byte
+//          (GPIOA DDR bit 25 cleared to read EXT_PORTA bit 25)         0x0306559c START + 0x20
+//          0x03065628 START + 0x21
+//          0x0306565c init: START+0x20, then 0x7a bytes from the table at 0x030b790c (registers
+//                     02H..3EH), STOP; copies the table's first 8 bytes into the shadow.
+//          0x03065694 volume: VOLUME into the shadow, rewrite 02H-05H from the shadow.
+//          0x030656ec tune:  02H = 0xC001, 03H = CHAN/BAND/SPACE/TUNE (see 03H).
+//          0x03065860 seek:  02H = 0xC301, 03H = CHAN/BAND/SPACE, TUNE = 0.
+//          0x030657c0 power-down: 02H = 0x8000 only.
+//          0x03065638 status read: START+0x21, 2 bytes (register 0AH only), master ACK after the
+//                     first, no ACK after the second, STOP. Caller 0x03065bb8 (the seek poll).
+//        Every one of these except the read takes the uC/OS object at IRAM 0x0003b9d0 (OSSemPend
+//        wrapper 0x0300c500 / post 0x0300c53c) around the transfer.
+//   [QEMU] boot of the stock image under this repo's -M dm32 model, breakpoints on the driver
+//        (gdb stub, 2026-10-11): the boot sequence (radio_boot_full_init_sequence @0x0305f2c8)
+//        calls the init (0x20 + the 122 table bytes, byte-identical to the table) and then the
+//        power-down (0x20 0x80 0x00). The FM radio stays off until the user turns it on.
+//
+// HIDDEN REGISTERS. The init table also writes registers 10H-3EH, which v1.0 does not document
+// (06H OPEN_MODE describes "behind registers" access). The values are in rda5807m_shadow.h. The
+// write of 3BH-3EH contradicts the datasheet's wrap at 3AH: if the counter wrapped there, the last
+// four words (0x262c 0x0608 0x0200 0x0000) would land on 00H-03H and leave ENABLE = 0. Open
+// question; the radio's FM receiver works, so either the counter does not wrap at 3AH on this part
+// or 02H/03H are rewritten before use (the tune path does rewrite both).
+
+`include "dm32_udp.rdl"
+
+addrmap rda5807m {
+    name = "RDA5807M FM tuner";
+    desc = "16-bit registers 00H-0FH. Not memory-mapped: the byte address is 2 x the register number, an ordering only; wire_addr is the register number. Writes start at 02H, reads start at 0AH, both auto-increment (2.5, p.5). Stock driver: 0x03065444-0x030658eb, shadow of 02H-05H at IRAM 0x00040108.";
+    ds_ref = "RDA5807M v1.0, 2.5 p.5; 6 p.9-13";
+    confidence = "DATASHEET";
+    default regwidth = 16;
+    default accesswidth = 16;
+    default sw = rw;
+    default hw = r;
+
+    reg {
+        name = "CHIPID";
+        desc = "Chip ID. Not reachable by the stock driver (reads start at 0AH and it reads only 2 bytes). Bits 7:0 are not described in v1.0.";
+        ds_ref = "RDA5807M v1.0, 6, p.9";
+        confidence = "DATASHEET";
+        wire_addr = 0x00;
+        field {
+            name = "CHIPID";
+            desc = "Chip ID.";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            confidence = "DATASHEET";
+            sw = r; hw = w;
+        } chipid[15:8] = 0x58;
+    } reg_00h @ 0x00;
+
+    reg {
+        name = "Control";
+        desc = "Power, mute, seek and clock control. First register of every write transfer. Stock values: 0xC001 (init table, tune 0x030656ec: DHIZ|DMUTE|ENABLE), 0xC301 (seek 0x03065860: adds SEEKUP|SEEK), 0x8000 (power-down 0x030657c0: DHIZ only, so muted and ENABLE = 0). The volume path 0x03065694 rewrites the shadow copy, turning a high byte of 0xC3 back into 0xC0 (ends a seek).";
+        ds_ref = "RDA5807M v1.0, 6, p.9-10";
+        fw_writes = "0x0306565c init (table 0x030b790c): 0xC001; 0x030656ec tune: 0xC001; 0x03065860 seek: 0xC301; 0x030657c0 power-down: 0x8000; 0x03065694 volume: shadow, 0xC3xx -> 0xC0xx";
+        hw_reads = "QEMU, stock boot: wire bytes c0 01 (init) then 80 00 (power-down)";
+        confidence = "CONFIRMED";
+        wire_addr = 0x02;
+        field {
+            name = "DHIZ";
+            desc = "Audio output high-Z disable: 0 = high impedance, 1 = normal operation. Stock: 1 in every write.";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "1 (0xC001, 0xC301, 0x8000)";
+            confidence = "CONFIRMED";
+        } dhiz[15:15] = 0;
+        field {
+            name = "DMUTE";
+            desc = "Mute disable: 0 = mute, 1 = normal operation. Stock: 1 when on, 0 in the power-down write.";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "1 (init/tune/seek), 0 (0x030657c0 power-down)";
+            confidence = "CONFIRMED";
+        } dmute[14:14] = 0;
+        field {
+            name = "MONO";
+            desc = "0 = stereo, 1 = force mono. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } mono[13:13] = 0;
+        field {
+            name = "BASS";
+            desc = "Bass boost: 0 = disabled, 1 = enabled. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } bass[12:12] = 0;
+        field {
+            name = "RCLK_NON_CALIBRATE_MODE";
+            desc = "0 = RCLK always supplied; 1 = RCLK not always supplied while FM works (then only +/-20 C swing from the tune point is supported). Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } rclk_non_calibrate_mode[11:11] = 0;
+        field {
+            name = "RCLK_DIRECT_INPUT_MODE";
+            desc = "1 = RCLK uses the direct input mode. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } rclk_direct_input_mode[10:10] = 0;
+        field {
+            name = "SEEKUP";
+            desc = "Seek direction: 0 = down, 1 = up. Stock: 1 in the seek write (always seeks up).";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "1 (0x03065860 seek), else 0";
+            confidence = "CONFIRMED";
+        } seekup[9:9] = 0;
+        field {
+            name = "SEEK";
+            desc = "1 = start a seek in the SEEKUP direction; it ends when a channel is found or the whole band was searched, then the chip clears SEEK and sets STC (0AH). Stock: 1 in the seek write only.";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "1 (0x03065860 seek), else 0";
+            confidence = "CONFIRMED";
+        } seek[8:8] = 0;
+        field {
+            name = "SKMODE";
+            desc = "0 = wrap at the band limit and keep seeking, 1 = stop at the band limit. Stock: 0 (wraps).";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } skmode[7:7] = 0;
+        field {
+            name = "CLK_MODE";
+            desc = "Reference clock: 000 32.768 kHz, 001 12 MHz, 101 24 MHz, 010 13 MHz, 110 26 MHz, 011 19.2 MHz, 111 38.4 MHz. Stock: 000, so the board feeds RCLK from a 32.768 kHz source (INFERRED from the setting; not traced on the PCB).";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } clk_mode[6:4] = 0;
+        field {
+            name = "RDS_EN";
+            desc = "1 = RDS/RBDS enable. Stock: 0 (no RDS).";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } rds_en[3:3] = 0;
+        field {
+            name = "NEW_METHOD";
+            desc = "1 = new demodulation method, about 1 dB better sensitivity. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.9";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } new_method[2:2] = 0;
+        field {
+            name = "SOFT_RESET";
+            desc = "1 = soft reset (also triggered by a 0 -> 1 edge, 2.4 p.5). Stock never sets it.";
+            ds_ref = "RDA5807M v1.0, 2.4 p.5; 6 p.9";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } soft_reset[1:1] = 0;
+        field {
+            name = "ENABLE";
+            desc = "Power-up enable: 0 = disabled, 1 = enabled. Stock: 1 when on, 0 in the power-down write.";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "1 (init/tune/seek), 0 (0x030657c0 power-down)";
+            confidence = "CONFIRMED";
+        } enable[0:0] = 0;
+    } reg_02h @ 0x04;
+
+    reg {
+        name = "Channel";
+        desc = "Channel, band, spacing, tune. Frequency = spacing x CHAN + base, base 87.0 MHz (BAND 0), 76.0 MHz (BAND 1/2), 65.0 or 50.0 MHz (BAND 3, chosen by 07H bit 9). Stock keeps the frequency as a u16 in 10 kHz units (IRAM 0x00040104) and always uses 50 kHz spacing: tune 0x030656ec computes, for f < 7600 (76.00 MHz), ((f - 6500)/5) << 6 | 0x1E (BAND 3 = 65-76 MHz since 07H bit 9 = 1, TUNE), else ((f - 7600)/5) << 6 | 0x1A (BAND 2 = 76-108 MHz, TUNE), and records the band in bit 1 of IRAM 0x00040114. Seek 0x03065860 uses the same formula with low bits 0x0E / 0x0A (TUNE = 0), choosing the band from that flag. Init table: 0x001A.";
+        ds_ref = "RDA5807M v1.0, 6, p.10";
+        fw_writes = "0x0306565c init: 0x001A; 0x030656ec tune: CHAN<<6 | 0x1E or 0x1A; 0x03065860 seek: CHAN<<6 | 0x0E or 0x0A";
+        hw_reads = "QEMU, stock boot: wire bytes 00 1a (init)";
+        confidence = "CONFIRMED";
+        wire_addr = 0x03;
+        field {
+            name = "CHAN";
+            desc = "Channel number; updated by the chip after a seek. Stock: (f_10kHz - 6500)/5 or (f_10kHz - 7600)/5, masked to 10 bits.";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "0x030656ec, 0x03065860 (computed); 0 in the init table";
+            confidence = "CONFIRMED";
+        } chan[15:6] = 0;
+        field {
+            name = "DIRECT_MODE";
+            desc = "Direct control mode, test only. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } direct_mode[5:5] = 0;
+        field {
+            name = "TUNE";
+            desc = "1 = start a tune; the chip sets STC (0AH) when done and clears TUNE. Stock: 1 in the init table and the tune write, 0 in the seek write.";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "1 (init, 0x030656ec), 0 (0x03065860)";
+            confidence = "CONFIRMED";
+        } tune[4:4] = 0;
+        field {
+            name = "BAND";
+            desc = "00 = 87-108 MHz, 01 = 76-91 MHz, 10 = 76-108 MHz, 11 = 65-76 MHz or 50-65 MHz (07H bit 9). Stock: 10 at or above 76 MHz, 11 below.";
+            ds_ref = "RDA5807M v1.0, 6, p.10 (BAND table and footnote 1)";
+            fw_writes = "2 or 3 (0x030656ec, 0x03065860); 2 in the init table";
+            confidence = "CONFIRMED";
+        } band[3:2] = 0;
+        field {
+            name = "SPACE";
+            desc = "Channel spacing: 00 = 100 kHz, 01 = 200 kHz, 10 = 50 kHz, 11 = 25 kHz. Stock: always 10 (50 kHz), which is why it divides the 10 kHz frequency offset by 5.";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "2 in every stock write";
+            confidence = "CONFIRMED";
+        } space[1:0] = 0;
+    } reg_03h @ 0x06;
+
+    reg {
+        name = "Control 2";
+        desc = "De-emphasis, softmute, AFC. Bits 14 and 7:0 are not listed in v1.0; stock writes 0 there. Stock value 0x0400 (init table; the volume path rewrites the same shadow value).";
+        ds_ref = "RDA5807M v1.0, 6, p.10";
+        fw_writes = "0x0306565c init: 0x0400; 0x03065694 volume: 0x0400 (from the shadow)";
+        hw_reads = "QEMU, stock boot: wire bytes 04 00 (init)";
+        confidence = "CONFIRMED";
+        wire_addr = 0x04;
+        field {
+            name = "RSVD15";
+            desc = "Reserved. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } rsvd15[15:15] = 0;
+        field {
+            name = "RSVD13_12";
+            desc = "Reserved. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } rsvd13_12[13:12] = 0;
+        field {
+            name = "DE";
+            desc = "De-emphasis: 0 = 75 us, 1 = 50 us. Stock: 0 (75 us, the Americas/Korea value; Europe and China use 50 us). Region-independent in this firmware.";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } de[11:11] = 0;
+        field {
+            name = "RSVD10";
+            desc = "Reserved in v1.0 (no reset value given). STOCK WRITES 1 here (0x0400); meaning unknown.";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "1 (init table 0x030b790c + 4)";
+            confidence = "CONFIRMED";
+        } rsvd10[10:10];
+        field {
+            name = "SOFTMUTE_EN";
+            desc = "1 = softmute enabled. Datasheet default 1; STOCK WRITES 0 (softmute off).";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } softmute_en[9:9] = 1;
+        field {
+            name = "AFCD";
+            desc = "AFC disable: 0 = AFC works, 1 = AFC disabled. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } afcd[8:8] = 0;
+    } reg_04h @ 0x08;
+
+    reg {
+        name = "Volume / seek threshold";
+        desc = "Interrupt mode, seek SNR threshold, volume. Stock value 0x86AF in the init table; the volume path 0x03065694 replaces the low nibble with the user volume (settings block 2 +0x20a, 1..15, out-of-range -> 13; read by volume_setting_load_clamp_apply @0x030557e8) and rewrites 02H-05H.";
+        ds_ref = "RDA5807M v1.0, 6, p.10-11";
+        fw_writes = "0x0306565c init: 0x86AF; 0x03065694 volume: 0x86A0 | volume";
+        hw_reads = "QEMU, stock boot: wire bytes 86 af (init)";
+        confidence = "CONFIRMED";
+        wire_addr = 0x05;
+        field {
+            name = "INT_MODE";
+            desc = "0 = 5 ms interrupt; 1 = interrupt lasts until register 0CH is read. Stock: 1 (the board has no RDA interrupt line in this driver; the driver polls).";
+            ds_ref = "RDA5807M v1.0, 6, p.10";
+            fw_writes = "1";
+            confidence = "CONFIRMED";
+        } int_mode[15:15] = 1;
+        field {
+            name = "RSVD14_12";
+            desc = "Reserved. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } rsvd14_12[14:12] = 0;
+        field {
+            name = "SEEKTH";
+            desc = "Seek SNR threshold; the default 1000b is about 32 dB SNR (footnote 2). Stock: 0110b (6), a lower threshold than the default, so weaker stations stop a seek.";
+            ds_ref = "RDA5807M v1.0, 6, p.11 and footnote 2";
+            fw_writes = "6";
+            confidence = "CONFIRMED";
+        } seekth[11:8] = 8;
+        field {
+            name = "UNDOC7_6";
+            desc = "Not listed in v1.0 (the table jumps from bit 8 to bits 5:4). STOCK WRITES 10b; meaning unknown.";
+            ds_ref = "RDA5807M v1.0, 6, p.11 (absent)";
+            fw_writes = "2 (init table 0x030b790c + 6, low byte 0xAF)";
+            confidence = "CONFIRMED";
+        } undoc7_6[7:6];
+        field {
+            name = "RSVD5_4";
+            desc = "Reserved, datasheet default 00. STOCK WRITES 10b.";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "2";
+            confidence = "CONFIRMED";
+        } rsvd5_4[5:4] = 0;
+        field {
+            name = "VOLUME";
+            desc = "DAC gain, logarithmic: 0000 = minimum (output muted, high impedance), 1111 = maximum. Stock: 15 in the init table, then the user's volume setting (1..15).";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "15 (init); settings block 2 +0x20a clamped 1..15, default 13 (0x03065694)";
+            confidence = "CONFIRMED";
+        } volume[3:0] = 15;
+    } reg_05h @ 0x0a;
+
+    reg {
+        name = "Open mode";
+        desc = "Access to the registers behind 0FH. Bits 12:0 are not listed in v1.0; stock writes 0 there. Written only by the init table.";
+        ds_ref = "RDA5807M v1.0, 6, p.11";
+        fw_writes = "0x0306565c init: 0x4000";
+        hw_reads = "QEMU, stock boot: wire bytes 40 00 (init)";
+        confidence = "CONFIRMED";
+        wire_addr = 0x06;
+        field {
+            name = "RSVD15";
+            desc = "Reserved. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } rsvd15[15:15] = 0;
+        field {
+            name = "OPEN_MODE";
+            desc = "11 = open the write function of the registers behind; any other value = read only. Stock: 10b, so by the datasheet the hidden-register writes in the init table (10H-3EH) would be read-only. Whether they take effect is not established.";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "2";
+            confidence = "CONFIRMED";
+        } open_mode[14:13] = 0;
+    } reg_06h @ 0x0c;
+
+    reg {
+        name = "Blend / band option";
+        desc = "Soft blend, 50/65 MHz band option, old-seek threshold, direct frequency mode. Written only by the init table: 0x56C6.";
+        ds_ref = "RDA5807M v1.0, 6, p.11";
+        fw_writes = "0x0306565c init: 0x56C6";
+        hw_reads = "QEMU, stock boot: wire bytes 56 c6 (init)";
+        confidence = "CONFIRMED";
+        wire_addr = 0x07;
+        field {
+            name = "RSVD15";
+            desc = "Reserved. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } rsvd15[15:15] = 0;
+        field {
+            name = "TH_SOFRBLEND";
+            desc = "Noise soft-blend threshold, 2 dB per step. The datasheet names it [5:0] but places it in bits 14:10 (5 bits); default 10000b. Stock: 10101b (21).";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "0x15";
+            confidence = "CONFIRMED";
+        } th_sofrblend[14:10] = 0x10;
+        field {
+            name = "MODE_65M_50M";
+            desc = "Valid when BAND = 11 (03H): 1 = 65-76 MHz, 0 = 50-76 MHz. Stock: 1, so the stock 'below 76 MHz' band is 65-76 MHz (matching its 6500 = 65.00 MHz base).";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "1";
+            confidence = "CONFIRMED";
+        } mode_65m_50m[9:9] = 1;
+        field {
+            name = "RSVD8";
+            desc = "Reserved. Stock: 0.";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } rsvd8[8:8] = 0;
+        field {
+            name = "SEEK_TH_OLD";
+            desc = "Seek threshold for the old seek mode, valid when Seek_Mode (register 20H bits 14:12) = 001 (footnote 3). Stock: 110001b (0x31). The init table writes 20H = 0x0661, whose bits 14:12 are 000, so by the datasheet this field is unused.";
+            ds_ref = "RDA5807M v1.0, 6, p.11 and footnote 3";
+            fw_writes = "0x31";
+            confidence = "CONFIRMED";
+        } seek_th_old[7:2] = 0;
+        field {
+            name = "SOFTBLEND_EN";
+            desc = "1 = soft blend enabled. Stock: 1.";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "1";
+            confidence = "CONFIRMED";
+        } softblend_en[1:1] = 1;
+        field {
+            name = "FREQ_MODE";
+            desc = "1 = frequency set directly: 76000 (or 87000) kHz + freq_direct (08H) kHz. Stock: 0 (channel mode).";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } freq_mode[0:0] = 0;
+    } reg_07h @ 0x0e;
+
+    reg {
+        name = "Direct frequency";
+        desc = "Not in the v1.0 register table; 07H FREQ_MODE names it freq_direct (08H), the offset in kHz added to 76000 or 87000 kHz when FREQ_MODE = 1. Written 0 by the init table only.";
+        ds_ref = "RDA5807M v1.0, 6, p.11 (07H FREQ_MODE description)";
+        fw_writes = "0x0306565c init: 0x0000";
+        confidence = "CONFIRMED";
+        wire_addr = 0x08;
+        field {
+            name = "FREQ_DIRECT";
+            desc = "Direct-mode frequency offset in kHz (unused by stock: FREQ_MODE = 0).";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } freq_direct[15:0];
+    } reg_08h @ 0x10;
+
+    reg {
+        name = "09H";
+        desc = "Not described in v1.0. Written 0 by the init table only.";
+        ds_ref = "RDA5807M v1.0, 6, p.9-13 (absent)";
+        fw_writes = "0x0306565c init: 0x0000";
+        confidence = "CONFIRMED";
+        wire_addr = 0x09;
+        field {
+            name = "UNDOC";
+            desc = "Undocumented. Stock writes 0.";
+            ds_ref = "RDA5807M v1.0, 6 (absent)";
+            fw_writes = "0";
+            confidence = "CONFIRMED";
+        } undoc[15:0];
+    } reg_09h @ 0x12;
+
+    reg {
+        name = "Status";
+        desc = "Status. First register of every read transfer. The stock driver reads only this register (2 bytes, 0x03065638); its caller, the seek poll at 0x03065bb8, accepts the result when (high byte & 0x60) == 0x40 (STC = 1, SF = 0), then sets the stored frequency (IRAM 0x00040104, 10 kHz units) to READCHAN x 5 + 6500 or + 7600 according to the band flag, redraws it, and saves it to flash block 4 +0x702 as BCD (0x03065918). The init table also writes 0x0000 here (a status register; whether the write has any effect is not documented).";
+        ds_ref = "RDA5807M v1.0, 2.5 p.5; 6 p.11-12";
+        fw_reads = "0x03065638 (2 bytes), tested at 0x03065bb8";
+        confidence = "CONFIRMED";
+        wire_addr = 0x0a;
+        default sw = r;
+        default hw = w;
+        field {
+            name = "RDSR";
+            desc = "1 = a new RDS/RBDS group is ready.";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            confidence = "DATASHEET";
+        } rdsr[15:15] = 0;
+        field {
+            name = "STC";
+            desc = "Seek/tune complete. Stock tests it (with SF) at 0x03065bb8.";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_reads = "0x03065bb8: (byte & 0x60) == 0x40";
+            confidence = "CONFIRMED";
+        } stc[14:14] = 0;
+        field {
+            name = "SF";
+            desc = "Seek fail: 1 = no channel with RSSI above the threshold was found.";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            fw_reads = "0x03065bb8: must be 0";
+            confidence = "CONFIRMED";
+        } sf[13:13] = 0;
+        field {
+            name = "RDSS";
+            desc = "RDS decoder synchronized (RDS verbose mode only).";
+            ds_ref = "RDA5807M v1.0, 6, p.11";
+            confidence = "DATASHEET";
+        } rdss[12:12] = 0;
+        field {
+            name = "BLK_E";
+            desc = "With RDS enabled: 1 = block E found.";
+            ds_ref = "RDA5807M v1.0, 6, p.11-12";
+            confidence = "DATASHEET";
+        } blk_e[11:11] = 0;
+        field {
+            name = "ST";
+            desc = "Stereo indicator: 0 = mono, 1 = stereo. Stock does not use it.";
+            ds_ref = "RDA5807M v1.0, 6, p.12";
+            confidence = "DATASHEET";
+        } st[10:10] = 1;
+        field {
+            name = "READCHAN";
+            desc = "Current channel, same formula as 03H CHAN; updated after a tune or seek.";
+            ds_ref = "RDA5807M v1.0, 6, p.12";
+            fw_reads = "0x03065bb8: & 0x3ff, x 5 + 6500 or 7600";
+            confidence = "CONFIRMED";
+        } readchan[9:0] = 0;
+    } reg_0ah @ 0x14;
+
+    reg {
+        name = "RSSI / RDS status";
+        desc = "RSSI and station flags. Never read by the stock driver (it stops after 0AH).";
+        ds_ref = "RDA5807M v1.0, 6, p.12-13";
+        confidence = "DATASHEET";
+        wire_addr = 0x0b;
+        default sw = r;
+        default hw = w;
+        field {
+            name = "RSSI";
+            desc = "RSSI, logarithmic. A 7-bit field, but the table lists 000000 = min, 111111 = max.";
+            ds_ref = "RDA5807M v1.0, 6, p.12";
+            confidence = "DATASHEET";
+        } rssi[15:9] = 0;
+        field {
+            name = "FM_TRUE";
+            desc = "1 = the current channel is a station.";
+            ds_ref = "RDA5807M v1.0, 6, p.12";
+            confidence = "DATASHEET";
+        } fm_true[8:8] = 0;
+        field {
+            name = "FM_READY";
+            desc = "1 = ready.";
+            ds_ref = "RDA5807M v1.0, 6, p.12";
+            confidence = "DATASHEET";
+        } fm_ready[7:7] = 0;
+        field {
+            name = "RSVD6_5";
+            desc = "Reserved.";
+            ds_ref = "RDA5807M v1.0, 6, p.12";
+            confidence = "DATASHEET";
+        } rsvd6_5[6:5] = 0;
+        field {
+            name = "ABCD_E";
+            desc = "1 = registers 0CH-0FH hold block E; 0 = blocks A-D.";
+            ds_ref = "RDA5807M v1.0, 6, p.12";
+            confidence = "DATASHEET";
+        } abcd_e[4:4];
+        field {
+            name = "BLERA";
+            desc = "Block errors of RDS block A (or E): 00 none, 01 1-2 corrected, 10 3-5 corrected, 11 6+ or uncorrectable. RDS verbose mode only.";
+            ds_ref = "RDA5807M v1.0, 6, p.12";
+            confidence = "DATASHEET";
+        } blera[3:2];
+        field {
+            name = "BLERB";
+            desc = "Block errors of RDS block B (or E), same coding as BLERA.";
+            ds_ref = "RDA5807M v1.0, 6, p.12-13";
+            confidence = "DATASHEET";
+        } blerb[1:0];
+    } reg_0bh @ 0x16;
+
+    reg {
+        name = "RDSA";
+        desc = "RDS block A (block E in RBDS mode when ABCD_E = 1). Not used by stock (RDS_EN = 0); the init table writes 0x0000 here.";
+        ds_ref = "RDA5807M v1.0, 6, p.13";
+        confidence = "DATASHEET";
+        wire_addr = 0x0c;
+        field { name = "RDSA"; desc = "RDS block A data."; ds_ref = "RDA5807M v1.0, 6, p.13"; confidence = "DATASHEET"; sw = r; hw = w; } rdsa[15:0] = 0x5803;
+    } reg_0ch @ 0x18;
+
+    reg {
+        name = "RDSB";
+        desc = "RDS block B (or E). Not used by stock; the init table writes 0x0000 here.";
+        ds_ref = "RDA5807M v1.0, 6, p.13";
+        confidence = "DATASHEET";
+        wire_addr = 0x0d;
+        field { name = "RDSB"; desc = "RDS block B data."; ds_ref = "RDA5807M v1.0, 6, p.13"; confidence = "DATASHEET"; sw = r; hw = w; } rdsb[15:0] = 0x5804;
+    } reg_0dh @ 0x1a;
+
+    reg {
+        name = "RDSC";
+        desc = "RDS block C (or E). Not used by stock; the init table writes 0x0000 here.";
+        ds_ref = "RDA5807M v1.0, 6, p.13";
+        confidence = "DATASHEET";
+        wire_addr = 0x0e;
+        field { name = "RDSC"; desc = "RDS block C data."; ds_ref = "RDA5807M v1.0, 6, p.13"; confidence = "DATASHEET"; sw = r; hw = w; } rdsc[15:0] = 0x5808;
+    } reg_0eh @ 0x1c;
+
+    reg {
+        name = "RDSD";
+        desc = "RDS block D (or E). Not used by stock; the init table writes 0x0000 here.";
+        ds_ref = "RDA5807M v1.0, 6, p.13";
+        confidence = "DATASHEET";
+        wire_addr = 0x0f;
+        field { name = "RDSD"; desc = "RDS block D data."; ds_ref = "RDA5807M v1.0, 6, p.13"; confidence = "DATASHEET"; sw = r; hw = w; } rdsd[15:0] = 0x5804;
+    } reg_0fh @ 0x1e;
+};

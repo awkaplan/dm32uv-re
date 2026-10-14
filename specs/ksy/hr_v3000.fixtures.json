@@ -1,0 +1,71 @@
+{
+  "generic": [
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 0,
+      "length": 476,
+      "note": "All HR_V3000 manual v1.2 UART examples (4.2.1, 5.1-5.9) as one stream, built from the manual's text, not captured; mixed directions"
+    },
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 0,
+      "length": 42,
+      "note": "HR_V3000 manual v1.2 4.2.1, p.12-13: encoder/decoder start/stop, ECMODE command and their ACKs"
+    },
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 42,
+      "length": 14,
+      "note": "HR_V3000 manual v1.2 5.1.2, p.14: ECMODE 0x1040 (DTX off), DCMODE 0x0008 (CNI on)"
+    },
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 56,
+      "length": 7,
+      "note": "HR_V3000 manual v1.2 5.2.2, p.15: ECMODE 0x1000 (NS off)"
+    },
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 63,
+      "length": 66,
+      "note": "HR_V3000 manual v1.2 5.3.2, p.16: encoder DTMF and decoder tone sequences"
+    },
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 129,
+      "length": 33,
+      "note": "HR_V3000 manual v1.2 5.4.2, p.17: AGC parameters and ECMODE 0x3840"
+    },
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 162,
+      "length": 24,
+      "note": "HR_V3000 manual v1.2 5.5.2, p.17: ERR_RATE (answer 3000 = 0x0bb8; the manual misprints it as 0xbb, b8) and TTL_ERRS"
+    },
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 186,
+      "length": 89,
+      "note": "HR_V3000 manual v1.2 5.6.2, p.18-19: recording and playback; DECP payload is a synthetic 0x00..0x1a placeholder"
+    },
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 275,
+      "length": 144,
+      "note": "HR_V3000 manual v1.2 5.7.2, p.19-20: encryption/decryption detours; ENCP/DECP payloads are synthetic placeholders"
+    },
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 419,
+      "length": 14,
+      "note": "HR_V3000 manual v1.2 5.8.2, p.20-21: GPIO_SET 0xa080, GPIO_RESET 0x0114"
+    },
+    {
+      "path": "specs/ksy/fixtures/hr_v3000_manual_examples.bin",
+      "offset": 433,
+      "length": 43,
+      "note": "HR_V3000 manual v1.2 5.9.2, p.21: READY, VERSTRING \"V1.2.0\", PRODID with an all-zero placeholder ID"
+    }
+  ],
+  "private_globs": []
+}

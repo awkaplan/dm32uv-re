@@ -1,0 +1,18 @@
+{
+  "name": "dm32uv-re patch kit",
+  "dockerComposeFile": "../docker/docker-compose.yml",
+  "service": "dm32uv-re",
+  "workspaceFolder": "/work",
+  "overrideCommand": true,
+  "shutdownAction": "stopCompose",
+  "postCreateCommand": "git submodule update --init --recursive",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-vscode.cpptools"
+      ]
+    }
+  },
+  "_note": "Attaches to the docker/docker-compose.yml service 'dm32uv-re' (same container 'docker compose run --rm dm32uv-re' uses). The Dockerfile ENTRYPOINT is /bin/bash with no long-running command, so overrideCommand:true makes the devcontainer start it with `sleep infinity` to keep the session alive; shutdownAction:stopCompose tears the compose project down with the devcontainer. The compose file bind-mounts repo subdirectories (tools/, meta/, data/, src/, include/, out/) under /work but NOT the repo root, so workspaceFolder is /work and only those directories are visible/editable inside the container (edit docs/, docker/, .github/ etc. on the host, or add a volume). The git submodule postCreateCommand is best-effort: the vendor/ submodules are baked into the image at build time and the repo root (.git) is not mounted, so it may report 'not a git repository' - harmless; run submodule updates from the host repo root instead."
+}

@@ -1,0 +1,28 @@
+.DS_Store
+*.o
+*.tmp
+build/_obj/
+
+# Build and tooling artefacts (regenerated; never committed)
+__pycache__/
+*.pyc
+*.elf
+tools/.ksc/
+tools/ghidra_project/
+tools/.env.ghidra
+specs/generated/python/__pycache__/
+
+# Worked-example build outputs: rebuilt by each example's own build script
+tools/examples/flash_overlay.bin
+tools/examples/snake/*.bin
+tools/examples/snake/*.elf
+tools/examples/snake/*.o
+# ...but the hand-written sources and the staged stock sectors stay tracked
+!tools/examples/snake/*stock.bin
+
+# Scratch
+tools/examples/_*/
+
+# Live radio captures are per-unit data and are never committed (docs/live-ram-capture.md)
+data/firmware/live-captures/*
+!data/firmware/live-captures/.gitkeep

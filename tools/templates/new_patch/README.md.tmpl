@@ -1,0 +1,66 @@
+# __PATCH_NAME__
+
+TODO: what this patch does, and for whom.
+
+Scaffolded by `tools/src/dm32_patch_tools/new_patch.py`. It is built by
+`tools/src/dm32_patch_tools/build_manifest_patch.py` from `__PATCH_NAME__.patch.json`.
+
+| file | role |
+|---|---|
+| `__PATCH_NAME__.c` | the handler: a call-site redirect that calls the original stock callee by name, then does its own work |
+| `__PATCH_NAME__.ld` | linker script: `INCLUDE dm32_patch_memory.ld` + `INCLUDE dm32_stock_symbols.ld`, entry first |
+| `__PATCH_NAME__.patch.json` | the manifest: blob, hook splice (**TODO**), claims |
+
+## 1. Pick the hook site (the manifest's TODO)
+
+The builder refuses to run while `addr` / `expect` still say `TODO`. To fill them in:
+
+1. Read `docs/menu-system.md`, `docs/keypad-input.md`, `docs/rtos-and-memory.md` and
+   `docs/patch-patterns.md` for the mechanism you are hooking.
+2. Find a stock `bsr <callee>` whose callee you want to wrap. Use `make -C tools lookup Q=<name>`,
+   `meta/disasm.jsonl` and `cs_disasm.py`. Do not search the raw image for the 4-byte
+   value: literal-pool hits are coincidences (`CLAUDE.md` gotcha 2).
+3. Set `addr` to that instruction's address. Set `expect` to its exact 4 stock bytes as hex, or use
+   `"expect_branch": {"kind": "bsr", "target": "@stock:<callee>"}`, which the builder encodes and
+   checks.
+4. Change the callee prototype in `__PATCH_NAME__.c` to match, and read the instructions after the
+   call site (see the comment at the top of the `.c` file).
+
+Worked example, used to prove this scaffold builds: `0x0301375c` in
+`keypad_poll_and_dispatch_key_event` is `bsr 0x0301cad0` (`lcd_bus_restore_after_keypad_scan`),
+stock bytes `00 e0 ba 49`. After the call the caller uses only r4, which is callee-saved, and it
+reloads r2/r3 before use. It never reads r0. That makes wrapping this call harmless:
+
+```json
+"addr": "0x0301375c",
+"expect": "00 e0 ba 49",
+```
+
+Other hook shapes are covered in `docs/patch-patterns.md`: displaced-instruction trampolines,
+case-block stubs, table relocation. A trampoline needs an assembly blob (`.S`), not this C
+handler. `tools/examples/snake/snake.patch.json` shows a multi-site manifest.
+
+## 2. Build (output goes to a gitignored dir, never into this one)
+
+```sh
+docker run --rm -v "$(git rev-parse --show-toplevel)":/repo -w /repo dm32uv-re-pipeline:qemufix3 \
+    -c 'python3 tools/src/dm32_patch_tools/build_manifest_patch.py tools/patches/__PATCH_NAME__/__PATCH_NAME__.patch.json'
+```
+
+The outputs land in `out/patches/__PATCH_NAME__/`: the full image, `sector_*_{stock,patched}.bin`
+and `summary.json`. Intermediates (`.o`/`.elf`/`.map`) land in `build/` there.
+
+## 3. Claim space before staging
+
+Until the patch owns a claim, every build warns that its writes are unclaimed. Add whole 4 KiB
+flash sectors plus an SRAM range to `data/allocations.json`, then run
+`python3 tools/src/dm32_patch_tools/gen_link_artifacts.py`. List the claim names under
+`"allocations"` in the manifest, and switch `__PATCH_NAME__.ld` to `dm32_patch_own_memory.ld` /
+`PATCH_OWN_FLASH` / `PATCH_OWN_SRAM`, as its header describes. From then on, build with
+`--require-claims`.
+
+## 4. Verify under QEMU, then stage
+
+See `docs/qemu-workflow.md` and `tools/examples/snake/README.md`: `compose_qemu_image.py` ->
+`qemu_run.py` -> `render_frames.py`, then `stage_sectors.py` on the built image. Flashing is a
+manual, human-run step on a radio with a verified full backup. Nothing in this repo flashes.

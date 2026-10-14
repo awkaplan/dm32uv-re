@@ -1,0 +1,68 @@
+name: tests
+
+# Host suite on every push/PR: stdlib python3 only, no toolchain, no QEMU, a few seconds.
+# The image suite (Snake golden rebuild, Snake QEMU fingerprint, verify_patch stock-vs-stock) needs
+# the toolchain+QEMU image built from docker/ (several GB, long build), so it is manual-only:
+# run it from the Actions tab ("Run workflow", image_suite = true).
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      image_suite:
+        description: "Also build the docker image from docker/ and run the image suite (slow)"
+        type: boolean
+        default: false
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Spec toolchain (pinned; same versions as tools/pyproject.toml's `specs` group)
+        run: |
+          python3 -m pip install systemrdl-compiler==1.32.2 peakrdl==1.5.0 peakrdl-cheader==1.1.0 \
+              peakrdl-html==2.12.2 kaitaistruct==0.11
+          tools/fetch_ksc.sh
+      - name: Host test suite
+        run: make -C tools test PYTHON=python3
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-host
+          path: out/test-results/
+
+  image:
+    if: github.event_name == 'workflow_dispatch' && inputs.image_suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build the toolchain/QEMU image
+        run: docker build -t dm32uv-re-pipeline:ci -f docker/Dockerfile .
+      - name: Image test suite
+        run: >
+          mkdir -p out/test-results &&
+          docker run --rm -e PYTHONDONTWRITEBYTECODE=1
+          -v "$PWD":/repo:ro -v "$PWD/out/test-results":/repo/out/test-results
+          -w /repo dm32uv-re-pipeline:ci
+          -c 'python3 tests/run_tests.py --suite image'
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-image
+          path: out/test-results/

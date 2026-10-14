@@ -1,0 +1,31 @@
+/*
+ * Decompiler reconstruction for interoperability research; not Baofeng source code.
+ * Source binary: DM32.00.01.048.bin (app region, file offset 0x1000+)
+ *   SHA-256: 0791558d1471415556bcea941e161cd695937edd41b7e8ed38a18bdca2556147
+ * Function: FUN_03001ca8 @ 03001ca8 (file base 0x03000000; code starts at 0x03001000)
+ * Size: 26 bytes
+ * Confidence: RAW (unmodified decompiler output; the name, if any, is a guess)
+ */
+
+
+/* Subsystem: unclassified
+ * Confidence: RAW - unmodified decompiler output; the name, if any, is a guess.
+ *
+ * GENERATED FILE - do not edit; regenerate from the source project.
+ */
+#include "dm32/dm32.h"
+
+void FUN_03001ca8(void)
+
+{
+  PIC_Type_17000000.PIC_MODE = 0;
+  PIC_Type_17000000.PIC_PO = 0xffffffff;
+  PIC_Type_17000000.PIC_MASK = 0xffffffff;
+  PIC_Type_17000000.PIC_MODE_1 = 0;
+  PIC_Type_17000000.PIC_PO_1 = 0xffffffff;
+  PIC_Type_17000000.PIC_MASK_1 = 0xffffffff;
+  PIC_Type_17000000.PIC_INT_ST = 0xffffffff;
+  PIC_Type_17000000.PIC_INT_ST_1 = 0xffffffff;
+  return;
+}
+

@@ -1,0 +1,84 @@
+{
+  "generic": [
+    {
+      "path": "specs/ksy/fixtures/hdboot_mini_rom_frames.bin",
+      "offset": 0,
+      "length": 80,
+      "note": "Constructed: Mini-format ROM commands DEBUG, DOWNLOAD, READ, WRITE, ERASE, RUN, EXIT",
+      "expect": {
+        "frames[0].cmd": "debug",
+        "frames[1].body.addr": "0x10000",
+        "frames[1].body.word_count": 4,
+        "frames[2].cmd": "read",
+        "frames[3].body.value.as_be": "0x12345678",
+        "frames[3].body.value.as_le": "0x78563412",
+        "frames[5].body.addr": "0x10974",
+        "frames[6].cmd": "exit"
+      }
+    },
+    {
+      "path": "specs/ksy/fixtures/hdboot_loader_session.bin",
+      "offset": 0,
+      "length": 560,
+      "root_type": "loader_session",
+      "note": "Constructed: DEBUG, one 256-byte DOWNLOAD (zero placeholder, not the real loader), RUN 0x00010974, loader reads and one 0xFF write to erased program flash",
+      "expect": {
+        "rom_frames[1].body.word_count": 64,
+        "rom_frames[2].cmd": "run",
+        "loader_frames[0].cmd": "progflash_read",
+        "loader_frames[1].cmd": "datachip_read",
+        "loader_frames[1].addr": "0x1000",
+        "loader_frames[2].cmd": "progflash_write",
+        "loader_frames[2].addr": "0xfff00"
+      }
+    },
+    {
+      "path": "specs/ksy/fixtures/hdboot_rom_boot_announce.bin",
+      "offset": 0,
+      "length": 8,
+      "root_type": "rom_boot_announce",
+      "note": "Constructed: what the ROM sends at power-on with no host (NOTIFY, then the stock entry word LE)",
+      "expect": {
+        "notify.code": "notify",
+        "entry": "0x3001000"
+      }
+    },
+    {
+      "path": "specs/ksy/fixtures/hdboot_mini_ok.bin",
+      "offset": 0,
+      "length": 4,
+      "root_type": "mini_device_frame",
+      "note": "Constructed: OK frame 02 05 00 03",
+      "expect": {
+        "code": "ok",
+        "arg": 0
+      }
+    },
+    {
+      "path": "specs/ksy/fixtures/hdboot_dh6000_frames.bin",
+      "offset": 0,
+      "length": 63,
+      "root_type": "dh6000_host_stream",
+      "note": "Constructed from the Dahua tool's DH6000 format: DEBUG, READ, WRITE, DOWNLOAD (8 bytes), RUN",
+      "expect": {
+        "frames[0].cmd": "debug",
+        "frames[1].body.addr": "0x3000000",
+        "frames[1].body.checksum": 7,
+        "frames[3].body.byte_count": 8,
+        "frames[3].body.checksum": 28,
+        "frames[4].cmd": "run"
+      }
+    },
+    {
+      "path": "specs/ksy/fixtures/hdboot_dh6000_status.bin",
+      "offset": 0,
+      "length": 4,
+      "root_type": "dh6000_status_frame",
+      "note": "Constructed: DH6000 status 00 03 00 01",
+      "expect": {
+        "code": "dh6000_ok"
+      }
+    }
+  ],
+  "private_globs": []
+}

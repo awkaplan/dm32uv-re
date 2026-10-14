@@ -1,0 +1,82 @@
+{
+  "generic": [
+    {
+      "path": "specs/ksy/fixtures/cps_host_session.bin",
+      "offset": 0,
+      "length": 4247,
+      "note": "Constructed host side of an OEM-order session: handshake, 16 V-frames, 0x47, PROGRAM, 4 reads, 1 sentinel write",
+      "expect": {
+        "handshake[0].text": "PSEARCH",
+        "handshake[2].text": "SYSINFO",
+        "info_frames[0].body.sub_id": "table_0d",
+        "info_frames[0].body.arg_c": 64,
+        "info_frames[1].body.sub_id": "firmware_version",
+        "info_frames[16].code": "g_read",
+        "info_frames[16].body.length": 256,
+        "info_frames[17].body.ignored": 12,
+        "frames[0].body.addr": "0x278000",
+        "frames[1].body.addr": "0x1fff",
+        "frames[2].body.length": 4096,
+        "frames[3].body.is_sentinel": true,
+        "frames[4].code": "write",
+        "frames[4].body.header.is_sentinel": true
+      }
+    },
+    {
+      "path": "specs/ksy/fixtures/cps_radio_session.bin",
+      "offset": 0,
+      "length": 8749,
+      "root_type": "radio_session",
+      "note": "Constructed radio side; V-frame values from the stock image, V-frame 0x02 / 0x47 data / block data are placeholders",
+      "expect": {
+        "psearch_reply.model": "DP570UV",
+        "info_replies[0].body.length": 64,
+        "info_replies[1].body.payload.text": "DM32.00.01.048",
+        "info_replies[3].body.payload.text": "2022-06-27",
+        "info_replies[10].body.payload.start": "0x1000",
+        "info_replies[10].body.payload.end": "0xc8fff",
+        "info_replies[14].body.payload.start": "0x278000",
+        "info_replies[15].body.payload.count": 50000,
+        "info_replies[16].code": "g_reply",
+        "info_replies[17].code": "ack",
+        "frames[0].body.echo.length": 4,
+        "frames[3].body.echo.is_sentinel": true,
+        "frames[4].code": "ack"
+      }
+    },
+    {
+      "path": "specs/ksy/fixtures/cps_debug_host.bin",
+      "offset": 0,
+      "length": 15,
+      "root_type": "host_frames_info",
+      "note": "Constructed: this project's debug sub-ids 0x3f, 0x40, 0x3e (patched firmware only)",
+      "expect": {
+        "frames[0].body.sub_id": "patch_ramdump_reset",
+        "frames[2].body.sub_id": "patch_flash_read_next"
+      }
+    },
+    {
+      "path": "specs/ksy/fixtures/cps_debug_radio.bin",
+      "offset": 0,
+      "length": 141,
+      "root_type": "radio_frames_info",
+      "note": "Constructed replies to the debug sub-ids; 0x40 carries the first 64 bytes of the derived stock IRAM image",
+      "expect": {
+        "frames[0].body.length": 4,
+        "frames[1].body.length": 64,
+        "frames[2].body.sub_id": "patch_flash_read_next"
+      }
+    }
+  ],
+  "private_globs": [
+    {
+      "glob": "cps-captures/*.txt",
+      "stream": "host"
+    },
+    {
+      "glob": "cps-captures/*.txt",
+      "stream": "radio",
+      "root_type": "radio_session"
+    }
+  ]
+}

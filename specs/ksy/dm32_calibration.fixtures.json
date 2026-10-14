@@ -1,0 +1,6 @@
+{
+  "generic": [],
+  "private_globs": [
+    "calibration/*/*.bin"
+  ]
+}

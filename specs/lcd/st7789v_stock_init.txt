@@ -1,0 +1,56 @@
+# DM-32UV LCD panel init, as sent by stock firmware DM32.00.01.048.
+#
+# Format: Linux panel-mipi-dbi command file (drivers/gpu/drm/tiny/panel-mipi-dbi.c,
+# Documentation/devicetree/bindings/display/panel/panel-mipi-dbi-spi.yaml): one
+# "command <opcode> [<param> ...]" per line, "delay <ms>" lines, "#" comments. The CC0 tool
+# mipi-dbi-cmd (github.com/notro/panel-mipi-dbi) compiles it to the driver's binary
+# (opcode, parameter count, parameters; a delay is opcode 0x00 with one parameter). Compiled
+# and decompiled with mipi-dbi-cmd 2026-10-11: round-trips to the same command list.
+#
+# Source: lcd_controller_power_on_init_sequence @0x03017d4c. Every line below was read from the
+# disassembly AND observed byte-for-byte under this repo's QEMU model (stock image, gdb-stub
+# breakpoints on lcd_write_command @0x0002c1cc and lcd_write_data @0x0002c1d8, 2026-10-11).
+# Each "@" address is the instruction that writes that command byte.
+#
+# CONTROLLER: the vendor commands (0xb2 ... 0xe1) are the Sitronix ST7789V command set (ST7789V
+# datasheet v1.3, section 9.2); genuine part or clone unconfirmed, see README.md. Opcode names:
+# tools/include/mipi_dcs.h and tools/include/st7789v.h.
+#
+# NOT COMMANDS (done by stock before the first command; a Linux driver does its own equivalents):
+#   @0x03017d52  creates the LCD/keypad bus semaphore (OSSemCreate via 0x0300c4d4, object
+#                0x00039344, count 1)
+#   @0x03017d5a  gpio_pin_set_output_level(0x42, 1)   0x42 = the panel reset line (see below)
+#   @0x03017d62  gpio_pin_set_output_level(0x46, 1)
+#   @0x03017d6e  i8080 controller: *(0x12000010) = 0x303
+#   @0x03017d74  i8080 controller: *(0x12000028) |= 1, then wait for bit 1 of 0x12000028
+#   @0x03017d8c  IO_DIPLEX2 &= 0xfff80107 (pads to the LCD block; mask read from 0x03017f4c)
+#   @0x03017d90  hardware reset: 0x42 high, 120 ms, low, 120 ms, high, 120 ms
+#                (delays: OSTimeDly_ms_wrapper @0x0300c4bc, argument 0x78)
+
+command 0x11                    # @0x03017db4 SLPOUT (exit sleep mode)
+delay 120                       # @0x03017dba OSTimeDly_ms_wrapper(0x78)
+command 0xb2 0x0c 0x0c 0x00 0x33 0x33   # @0x03017dc0 ST7789V PORCTRL (= its power-on default)
+command 0x35 0x00               # @0x03017de4 TEON, TE line = V-blank only
+command 0x36 0xc0               # @0x030178f2 MADCTL via lcd_set_orientation (call @0x03017df8):
+                                #   0xc0 when settings byte IRAM 0x0003e9b4+0x6d bit 0 = 0 (seen
+                                #   under QEMU), 0x00 when it is 1 (user display-direction option)
+command 0x3a 0x05               # @0x03017dfe COLMOD, 16 bits/pixel (RGB565)
+command 0xb7 0x56               # @0x03017e0a ST7789V GCTRL
+command 0xbb 0x17               # @0x03017e16 ST7789V VCOMS
+command 0xc0 0x2c               # @0x03017e22 ST7789V LCMCTRL (= default)
+command 0xc2 0x01               # @0x03017e2e ST7789V VDVVRHEN (only 1 of its 2 parameters)
+command 0xc3 0x0b               # @0x03017e3a ST7789V VRHS (= default)
+command 0xc6 0xef               # @0x03017e46 ST7789V FRCTRL2
+command 0xd0 0xa7               # @0x03017e52 ST7789V PWCTRL1, 1 parameter, not the documented A4h
+command 0xd0 0xa4 0xa1          # @0x03017e5e ST7789V PWCTRL1
+command 0xd6 0xa1               # @0x03017e6a undocumented (not in ST7789V v1.3 / ST7789VW v1.0)
+command 0xe0 0x70 0x03 0x08 0x07 0x08 0x15 0x30 0x54 0x47 0x3a 0x15 0x14 0x2b 0x2e   # @0x03017e7c ST7789V PVGAMCTRL
+command 0xe1 0x70 0x06 0x0a 0x09 0x06 0x03 0x2f 0x44 0x47 0x38 0x12 0x15 0x29 0x2f   # @0x03017ed6 ST7789V NVGAMCTRL
+# display_clear_fullscreen (call @0x03017f2e) -> display_fill_rect(0, 0, 240, 320, 0x0000):
+command 0x2a 0x00 0x00 0x00 0xef        # @0x03017bf0 CASET 0..239 (display_set_x_window)
+command 0x2b 0x00 0x00 0x01 0x3f        # @0x03017c18 RASET 0..319 (display_set_y_window)
+command 0x2c                            # @0x03017910 RAMWR (lcd_ram_write_begin)
+#   ...followed by 76800 pixels of 0x0000 (153600 data bytes); not representable here
+command 0x21                    # @0x03017f34 INVON (display inversion on)
+command 0x29                    # @0x03017f3a DISPON
+command 0x2c                    # @0x03017f40 RAMWR, opens a write; no data follows in this function

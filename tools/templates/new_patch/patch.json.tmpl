@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Patch manifest for build_manifest_patch.py (scaffolded by new_patch.py). The format is",
+    "documented in that script's docstring, and tools/examples/snake/snake.patch.json is a full",
+    "multi-site example. The one splice below is a deliberate TODO: the builder refuses to run",
+    "until you fill in a real hook site AND the exact stock bytes it overwrites. See README.md."
+  ],
+  "name": "__PATCH_NAME__",
+  "description": "TODO: one line on what this patch does",
+  "allocations": [],
+
+  "blobs": [
+    {
+      "name": "__PATCH_NAME__",
+      "sources": ["__PATCH_NAME__.c"],
+      "cflags": ["-O2", "-Wall", "-ffunction-sections", "-fdata-sections"],
+      "ldflags": ["--gc-sections"],
+      "linker_script": "__PATCH_NAME__.ld",
+      "entry": "__PATCH_NAME___entry"
+    }
+  ],
+
+  "splices": [
+    {
+      "name": "hook",
+      "why": "TODO: which stock `bsr <callee>` this replaces and why. The handler calls the same callee first.",
+      "addr": "TODO_HOOK_ADDR",
+      "expect": "TODO_STOCK_BYTES_AT_HOOK_ADDR",
+      "branch": {"kind": "bsr", "target": "@__PATCH_NAME__"}
+    }
+  ]
+}

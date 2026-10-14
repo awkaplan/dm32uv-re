@@ -1,0 +1,13 @@
+{
+  "generic": [],
+  "private_globs": [
+    "datachip/*/full/*.bin",
+    "datachip/*/config/*.bin",
+    {"glob": "datachip/*/region_0c9000/*.bin", "root_type": "font_region"},
+    {"glob": "datachip/*/region_0d0000/*.bin", "root_type": "font_region"},
+    {"glob": "datachip/*/region_0e0000/*.bin", "root_type": "font_region"},
+    {"glob": "datachip/*/region_180000/*.bin", "root_type": "icon_region"},
+    {"glob": "datachip/*/region_265000/*.bin", "root_type": "icon_region"},
+    {"glob": "datachip/*/region_6dc000/*.bin", "root_type": "tail_region"}
+  ]
+}

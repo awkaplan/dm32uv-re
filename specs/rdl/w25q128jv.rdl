@@ -1,0 +1,448 @@
+// w25q128jv.rdl - Winbond W25Q128JV, 128 Mbit (16 MB) SPI NOR flash: the DM-32UV "data chip"
+// (codeplug, record store, fonts, contact database and the per-unit calibration page).
+//
+// Source: Winbond "W25Q128JV 3V 128M-bit Serial Flash Memory with Dual/Quad SPI", Revision F,
+// 2018-03-27 (cited below as "W25Q128JV Rev F"). Page numbers are PDF page indices, which run one
+// ahead of the printed page footers in this edition (PDF p.23 is printed page 22).
+// Stock-firmware evidence: DM32.00.01.048 (IRAM image and program flash), instruction-level trace.
+//
+// LAYOUT CONVENTION (a SPI NOR flash has no register address bus; see specs/README.md):
+//   status @ 0x000 - the three status registers. Each is selected on the wire by an opcode, so
+//                    `wire_addr` is the opcode that READS it and `wr_cmd` names the opcode(s) that
+//                    write it. Status bits stored in flash carry `nonvolatile = true`.
+//   id     @ 0x010 - read-only identification values, `wire_addr` = the opcode that returns them.
+//   cmd    @ 0x100 - the instruction set. One 8-bit pseudo-register per opcode, placed at an
+//                    address offset equal to the opcode byte, with a single constant field
+//                    `opcode` (sw = r, hw = na, reset = the opcode). This is how this repo writes
+//                    a command enum in SystemRDL: an SystemRDL `enum` cannot carry the evidence
+//                    properties (ds_ref / fw_writes / confidence) per member, a register can.
+//                    tools/src/dm32_patch_tools/gen_rdl.py emits this block as a C `enum`.
+//                    Every erase, program, status-write and security-register erase/program
+//                    opcode carries `destructive = true`.
+//
+// STOCK-FIRMWARE SUMMARY (the safety payoff). The stock firmware sends exactly five opcodes to
+// this chip: 06h, 05h, 03h, 02h, 20h. It never sends a status-register write (01h/31h/11h/50h),
+// a block or chip erase (52h/D8h/C7h/60h), a security-register erase/program (44h/42h), a
+// lock/unlock, 9Fh or 4Bh. Every erase is a 4 KB sector erase issued from ONE function
+// (0x0002b9b4) and every program from ONE function (0x0002b8a8); their callers are listed in
+// cmd.SECTOR_ERASE and cmd.PAGE_PROGRAM. Method: a linear CK803S disassembly sweep of the whole
+// IRAM image (0x00010000-0x00057fff) and program flash; every call to the SPI_Master0 transfer
+// primitives with bus index 0 (0x0002c09c, 0x0002bfc4, 0x0002bf90) and every toggle of the
+// chip-select GPIOA bit 18 (0x12) lies in the seven functions at 0x0002b814-0x0002ba5a, and no
+// function-pointer literal to any of them exists in either image.
+
+`include "dm32_udp.rdl"
+
+addrmap w25q128jv {
+    name = "W25Q128JV data flash";
+    desc = "16 MB SPI NOR flash (JEDEC EF 40 18) on SPI_Master0 (0x140a0000, bus index 0 of the SSI base table at 0x030ada00), chip select bit-banged on GPIOA bit 18 (0x12, active low; gpio_clear_output_bit 0x0002c544 / gpio_set_output_bit 0x0002c500). Standard single SPI, 3-byte addresses, 256-byte pages, 4 KB sectors. Holds per-unit data (calibration page): never erase or program it without a verified backup of the same radio. Not to be confused with the program flash (gd25q80.rdl, on the LCSFC) or the SD card on SPI_Master1 (chip select GPIO 0x17), whose corpus functions are misleadingly named (sdcard_spi_probe_and_init, renamed 2026-10-11 from spi_nor_flash_probe_and_identify; 0x03066ae0 is an SD SPI-mode init: CMD0/8/55/41/58/16) and spi_sdcard_block_write_dispatch (formerly spi_flash_write_erase_dispatch, 0x03066d24; an SD block writer).";
+    ds_ref = "W25Q128JV Rev F (2018-03-27)";
+    confidence = "CONFIRMED";
+
+    default regwidth = 8;
+
+    // ---------------------------------------------------------------- status registers
+    addrmap {
+        name = "Status registers";
+        desc = "Selected by opcode, not by address. Non-volatile bits are written with 06h + 01h/31h/11h; their volatile copies with 50h + 01h/31h/11h (lost at power-off). Reserved bits are omitted. The stock firmware reads only SR1 bit 0 and never writes any status register of this chip.";
+        ds_ref = "W25Q128JV Rev F, 7.1, PDF p.14-18";
+        confidence = "DATASHEET";
+
+        reg {
+            name = "Status Register-1";
+            desc = "Read with 05h (wire_addr), written with wr_cmd. Factory default 0x00.";
+            wr_cmd = "01h after 06h (non-volatile bits) or after 50h (volatile copies); a second data byte after 01h also writes SR2";
+            wire_addr = 0x05;
+            confidence = "CONFIRMED";
+            ds_ref = "W25Q128JV Rev F, 7.1 Figure 4a, PDF p.14; 8.2.4-8.2.5, PDF p.26-28";
+            fw_reads = "0x0002b83c spi_flash_wait_wip: sends 05h, reads one byte, tests bit 0 only (andi 1 at 0x0002b87e).";
+
+            field {
+                name = "BUSY"; desc = "Erase/write in progress. Status only.";
+                sw = r; hw = w;
+                confidence = "CONFIRMED";
+                ds_ref = "W25Q128JV Rev F, 7.1.1 (first of two 7.1.1 headings), PDF p.14";
+                fw_reads = "0x0002b83c spi_flash_wait_wip polls this bit after every 02h (call at 0x0002b8f6) and every 20h (call at 0x0002b9f2), up to 1400 times (0xaf<<3) with a delay (0x0002e0d8) between reads; a timeout falls through silently.";
+            nonvolatile = false; } BUSY[0:0] = 0;
+            field {
+                name = "WEL"; desc = "Write enable latch: set by 06h, cleared by 04h and at the end of every program/erase/status write. Status only.";
+                sw = r; hw = w;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.2, PDF p.14";
+                fw_writes = "Never read; set indirectly by the 06h that 0x0002b8a8 and 0x0002b9b4 send before each 02h/20h.";
+            nonvolatile = false; } WEL[1:1] = 0;
+            field {
+                name = "BP"; desc = "Block protect BP2:BP0 (S4:S2). Non-volatile (volatile copy writable). Factory default 0 = nothing protected. Interpreted with SEC, TB, CMP when WPS = 0 (tables 7.1.8/7.1.9).";
+                sw = rw; hw = na;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.3, PDF p.14; protection tables p.19-20";
+            nonvolatile = true; } BP[4:2] = 0;
+            field {
+                name = "TB"; desc = "Top (0) / bottom (1) protect. Non-volatile (volatile copy writable). Factory default 0.";
+                sw = rw; hw = na;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.4, PDF p.15";
+            nonvolatile = true; } TB[5:5] = 0;
+            field {
+                name = "SEC"; desc = "Sector (1, 4 KB granules) / block (0, 64 KB granules) protect. Non-volatile (volatile copy writable). Default 0.";
+                sw = rw; hw = na;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.5, PDF p.15; bit position from Figure 4a, PDF p.14";
+            nonvolatile = true; } SEC[6:6] = 0;
+            field {
+                name = "SRP"; desc = "Status register protect; with SRL and /WP selects software / hardware / power-supply lock-down / OTP protection of the status registers. Non-volatile (volatile copy writable). Factory default 0 (software protection).";
+                sw = rw; hw = na;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.1 (second 7.1.1 heading, SRP/SRL), PDF p.16; bit position from Figure 4a, PDF p.14";
+            nonvolatile = true; } SRP[7:7] = 0;
+        } SR1 @ 0x0;
+
+        reg {
+            name = "Status Register-2";
+            wr_cmd = "31h after 06h (non-volatile) or 50h (volatile); or the second data byte of 01h";
+            desc = "Read with 35h (wire_addr), written with wr_cmd. Power-up value on the DM-32UV's part (-IQ/-JQ) is 0x02: QE is factory-fixed to 1, see QE.";
+            wire_addr = 0x35;
+            confidence = "DATASHEET";
+            ds_ref = "W25Q128JV Rev F, 7.1 Figure 4b, PDF p.17; 8.2.4-8.2.5, PDF p.26-28";
+
+            field {
+                name = "SRL"; desc = "Status register lock (power-supply lock-down when 1; cleared by a power cycle). Volatile/non-volatile writable.";
+                sw = rw; hw = na;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.1 (second heading), PDF p.16; Figure 4b, PDF p.17";
+            nonvolatile = true; } SRL[0:0] = 0;
+            field {
+                name = "QE"; desc = "Quad enable. Factory-fixed 1 on -IQ/-JQ parts, 0 on -IM/-JM. The radio's part reads JEDEC EF 40 18, which the datasheet assigns to -IQ/-JQ, so the reset value here is 1; the bit itself has not been read on a radio.";
+                sw = rw; hw = na;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.4 (second heading), PDF p.17; device ID table 8.1.1, PDF p.22";
+                ds_value = "0 for ordering codes -IM/-JM; factory-fixed 1 for -IQ/-JQ";
+                hw_reads = "Real radio: 9Fh on chip select GPIOA 0x12 returned EF 40 18 (= -IQ/-JQ per 8.1.1). SR2 never read directly.";
+            nonvolatile = true; } QE[1:1] = 1;
+            field {
+                name = "LB1"; desc = "Security register 1 lock (OTP: once 1, security register 1 is read-only forever). Factory default 0.";
+                sw = rw; hw = na; onwrite = woset;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.3 (second heading), PDF p.17";
+            nonvolatile = true; } LB1[3:3] = 0;
+            field {
+                name = "LB2"; desc = "Security register 2 lock (OTP). Factory default 0.";
+                sw = rw; hw = na; onwrite = woset;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.3 (second heading), PDF p.17";
+            nonvolatile = true; } LB2[4:4] = 0;
+            field {
+                name = "LB3"; desc = "Security register 3 lock (OTP). Factory default 0.";
+                sw = rw; hw = na; onwrite = woset;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.3 (second heading), PDF p.17";
+            nonvolatile = true; } LB3[5:5] = 0;
+            field {
+                name = "CMP"; desc = "Complement protect: inverts the area selected by SEC/TB/BP. Non-volatile (volatile copy writable). Default 0.";
+                sw = rw; hw = na;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.6, PDF p.15";
+            nonvolatile = true; } CMP[6:6] = 0;
+            field {
+                name = "SUS"; desc = "Erase/program suspended (set by 75h, cleared by 7Ah or power cycle). Status only.";
+                sw = r; hw = w;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.2 (second heading), PDF p.17";
+            nonvolatile = false; } SUS[7:7] = 0;
+        } SR2 @ 0x1;
+
+        enum drv_e {
+            PCT_100 = 2'd0 { desc = "100% output driver strength"; };
+            PCT_75  = 2'd1 { desc = "75%"; };
+            PCT_50  = 2'd2 { desc = "50%"; };
+            PCT_25  = 2'd3 { desc = "25% (datasheet default)"; };
+        };
+
+        reg {
+            name = "Status Register-3";
+            desc = "Read with 15h (wire_addr), written with wr_cmd. Factory default 0x60.";
+            wr_cmd = "11h after 06h (non-volatile) or 50h (volatile)";
+            wire_addr = 0x15;
+            confidence = "DATASHEET";
+            ds_ref = "W25Q128JV Rev F, 7.1 Figure 4c, PDF p.18; 8.2.4-8.2.5, PDF p.26-28";
+
+            field {
+                name = "WPS"; desc = "Write protect selection: 0 = SEC/TB/BP/CMP scheme, 1 = individual block/sector locks (36h/39h/3Dh/7Eh/98h, which power up all-locked). Factory default 0.";
+                sw = rw; hw = na;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.5 (second heading), PDF p.18; factory default stated in 6.x write protection, PDF p.13";
+            nonvolatile = true; } WPS[2:2] = 0;
+            field {
+                name = "DRV"; desc = "Output driver strength DRV1:DRV0 for reads. Figure 4c labels S21 'DRV2'; the text and table name it DRV0 (datasheet typo; the text wins).";
+                sw = rw; hw = na;
+                encode = drv_e;
+                confidence = "DATASHEET";
+                ds_ref = "W25Q128JV Rev F, 7.1.6 (second heading), PDF p.18";
+            nonvolatile = true; } DRV[6:5] = 3;
+        } SR3 @ 0x2;
+    } status @ 0x000;
+
+    // ---------------------------------------------------------------- identification
+    addrmap {
+        name = "Identification";
+        desc = "Read-only values returned by an opcode (wire_addr). The three 256-byte security registers (48h/42h/44h at addresses 0x001000/0x002000/0x003000) are memory, not registers, and are not described here.";
+        ds_ref = "W25Q128JV Rev F, 8.1.1, PDF p.22";
+        confidence = "DATASHEET";
+
+        reg {
+            name = "JEDEC ID";
+            desc = "Returned by 9Fh as three bytes, manufacturer first. Read on the real radio; the stock firmware never sends 9Fh.";
+            regwidth = 32;
+            wire_addr = 0x9F;
+            confidence = "CONFIRMED";
+            ds_ref = "W25Q128JV Rev F, 8.1.1, PDF p.22; 8.2.27, PDF p.51";
+            hw_reads = "Real radio: 9Fh on chip select GPIOA 0x12 returned EF 40 18.";
+            field { name = "MF"; desc = "Manufacturer ID (Winbond = EFh)."; sw = r; hw = na;
+                    confidence = "CONFIRMED"; ds_ref = "W25Q128JV Rev F, 8.1.1, PDF p.22";
+                    hw_reads = "Real radio: EFh."; } MF[23:16] = 0xEF;
+            field { name = "MEMORY_TYPE"; desc = "Memory type (40h = -IQ/-JQ; 70h = -IM/-JM)."; sw = r; hw = na;
+                    confidence = "CONFIRMED"; ds_ref = "W25Q128JV Rev F, 8.1.1, PDF p.22";
+                    hw_reads = "Real radio: 40h."; } MEMORY_TYPE[15:8] = 0x40;
+            field { name = "CAPACITY"; desc = "Capacity (18h = 128 Mbit)."; sw = r; hw = na;
+                    confidence = "CONFIRMED"; ds_ref = "W25Q128JV Rev F, 8.1.1, PDF p.22";
+                    hw_reads = "Real radio: 18h."; } CAPACITY[7:0] = 0x18;
+        } JEDEC_ID @ 0x0;
+
+        reg {
+            name = "Unique ID";
+            desc = "Factory-programmed 64-bit serial number, returned by 4Bh after four dummy bytes. Per device: no value is recorded in this repo. The stock firmware never sends 4Bh to this chip, so it cannot be what binds firmware to a unit.";
+            regwidth = 64;
+            wire_addr = 0x4B;
+            confidence = "DATASHEET";
+            ds_ref = "W25Q128JV Rev F, 8.2.26, PDF p.50";
+            fw_reads = "Never: no 4Bh is sent by any stock function (see the file header for the method).";
+            field { name = "UID"; desc = "UID63:UID0, MSB first."; sw = r; hw = na;
+                    confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.26, PDF p.50"; } UID[63:0];
+        } UNIQUE_ID @ 0x8;
+    } id @ 0x010;
+
+    // ---------------------------------------------------------------- instruction set
+    // Constant opcode field. Two variants so the field's own confidence says whether the byte
+    // value itself was seen in the stock firmware's command frames.
+    field opcode_f {
+        name = "Opcode"; desc = "Instruction byte, the first byte clocked in after /CS falls, MSB first.";
+        sw = r; hw = na;
+        confidence = "DATASHEET";
+        ds_ref = "W25Q128JV Rev F, 8.1.2-8.1.3 (Instruction Set Tables 1-2), PDF p.23-24";
+    };
+    field opcode_fw_f {
+        name = "Opcode"; desc = "Instruction byte, the first byte clocked in after /CS falls, MSB first. This value appears as an immediate in the stock firmware's command frame (see the register's fw_writes).";
+        sw = r; hw = na;
+        confidence = "CONFIRMED";
+        ds_ref = "W25Q128JV Rev F, 8.1.2-8.1.3 (Instruction Set Tables 1-2), PDF p.23-24";
+        fw_writes = "See the enclosing register's fw_writes for the instruction that builds this byte.";
+    };
+
+    addrmap {
+        name = "Instruction set";
+        desc = "One pseudo-register per opcode at offset = opcode. Frame notation: A = 3 address bytes (A23-A0), D = data, dummy = don't-care byte. Write, program and erase instructions must end on a byte boundary or are ignored; all but 05h/35h/15h and 75h are ignored while BUSY.";
+        ds_ref = "W25Q128JV Rev F, 8, PDF p.22-24";
+        confidence = "DATASHEET";
+
+        // --- write enable / disable
+        reg { name = "Write Enable"; desc = "Frame: 06h. Sets WEL; required before every program, erase, non-volatile status write and security-register erase/program.";
+              confidence = "CONFIRMED"; ds_ref = "W25Q128JV Rev F, 8.2.1, PDF p.25";
+              fw_writes = "0x0002b814 spi_flash_cmd1_send sends a 1-byte frame (CS low, byte, CS high). Its only callers pass 06h: 0x0002b8b0/0x0002b8b2 in spi_flash_page_program_raw (before every 02h) and 0x0002b9b8/0x0002b9ba in spi_flash_cmd_sector_erase_raw (before every 20h).";
+              opcode_fw_f opcode[7:0] = 0x06; } WRITE_ENABLE @ 0x06;
+        reg { name = "Write Enable for Volatile Status Register"; desc = "Frame: 50h. Makes the next 01h/31h/11h write the volatile status bits only (WEL stays 0).";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.2, PDF p.25";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x50; } VOLATILE_SR_WRITE_ENABLE @ 0x50;
+        reg { name = "Write Disable"; desc = "Frame: 04h. Clears WEL.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.3, PDF p.26";
+              fw_writes = "Never sent by stock firmware to this chip.";
+              opcode_f opcode[7:0] = 0x04; } WRITE_DISABLE @ 0x04;
+
+        // --- status registers
+        reg { name = "Read Status Register-1"; desc = "Frame: 05h, then SR1 repeats until /CS rises. Allowed while BUSY.";
+              confidence = "CONFIRMED"; ds_ref = "W25Q128JV Rev F, 8.2.4, PDF p.26";
+              fw_writes = "0x0002b83c spi_flash_wait_wip: opcode 05h built at 0x0002b846/0x0002b85a, sent with a 1-byte read via spi_controller_byte_xfer_rdwr (0x0002bfc4) at 0x0002b872. Called only from 0x0002b8a8 (after 02h) and 0x0002b9b4 (after 20h).";
+              opcode_fw_f opcode[7:0] = 0x05; } READ_STATUS_1 @ 0x05;
+        reg { name = "Read Status Register-2"; desc = "Frame: 35h, then SR2.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.4, PDF p.26";
+              fw_writes = "Never sent to this chip. (0x0002bb98 sends 35h, but to the controller at 0x04000000, not SPI_Master0 / CS 0x12; see gd25q80.rdl.)";
+              opcode_f opcode[7:0] = 0x35; } READ_STATUS_2 @ 0x35;
+        reg { name = "Read Status Register-3"; desc = "Frame: 15h, then SR3.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.4, PDF p.26";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x15; } READ_STATUS_3 @ 0x15;
+        reg { name = "Write Status Register-1"; desc = "Frame: 01h S7-S0 [S15-S8]. After 06h writes the non-volatile bits (BUSY during tW); after 50h the volatile copies. A second data byte writes SR2 too. Can permanently set LB1-3 and lock the status registers: OTP risk.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.5, PDF p.27-28";
+              fw_writes = "Never sent to this chip by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x01; } WRITE_STATUS_1 @ 0x01;
+        reg { name = "Write Status Register-2"; desc = "Frame: 31h S15-S8. OTP risk (LB1-3, SRL).";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.5, PDF p.27";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x31; } WRITE_STATUS_2 @ 0x31;
+        reg { name = "Write Status Register-3"; desc = "Frame: 11h S23-S16.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.5, PDF p.27";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x11; } WRITE_STATUS_3 @ 0x11;
+
+        // --- reads
+        reg { name = "Read Data"; desc = "Frame: 03h A, then data until /CS rises (address auto-increments across the whole array).";
+              confidence = "CONFIRMED"; ds_ref = "W25Q128JV Rev F, 8.2.6, PDF p.29";
+              fw_writes = "0x0002b958 spi_flash_read_data_raw: 03h at 0x0002b966, address from the shadow word at RAM 0x0003869c ((sector<<12)|offset, set by 0x0002b898), via spi_flash_read_seq 0x0002b99c (callers: flash_block_read, flash_field_read_cached, flash_page_read_modify_write, flash_record_commit_3field/4field, flash_page_tag_search, flash_page_find_first_free and 23 more record-store functions). 0x0002ba10 spi_flash_read_mutex_guarded: 03h at 0x0002ba26 with a caller-supplied 24-bit address (callers lcd_blit_image_from_spi_flash 0x0301802c, flash_audio_clip_playback_tx 0x030222f0).";
+              opcode_fw_f opcode[7:0] = 0x03; } READ_DATA @ 0x03;
+        reg { name = "Fast Read"; desc = "Frame: 0Bh A dummy, then data.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.7, PDF p.30";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x0B; } FAST_READ @ 0x0B;
+        reg { name = "Fast Read Dual Output"; desc = "Frame: 3Bh A dummy, then data on IO0/IO1.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.8, PDF p.31";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x3B; } FAST_READ_DUAL_OUTPUT @ 0x3B;
+        reg { name = "Fast Read Quad Output"; desc = "Frame: 6Bh A dummy, then data on IO0-IO3 (needs QE = 1).";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.9, PDF p.32";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x6B; } FAST_READ_QUAD_OUTPUT @ 0x6B;
+        reg { name = "Fast Read Dual I/O"; desc = "Frame: BBh, address and M7-M0 on IO0/IO1, then data.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.10, PDF p.33";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0xBB; } FAST_READ_DUAL_IO @ 0xBB;
+        reg { name = "Fast Read Quad I/O"; desc = "Frame: EBh, address and M7-M0 on IO0-IO3, two dummy bytes, then data.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.11, PDF p.34";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0xEB; } FAST_READ_QUAD_IO @ 0xEB;
+        reg { name = "Set Burst with Wrap"; desc = "Frame: 77h dummy dummy dummy W8-W0 (quad).";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.12, PDF p.36";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x77; } SET_BURST_WITH_WRAP @ 0x77;
+
+        // --- program
+        reg { name = "Page Program"; desc = "Frame: 06h, then 02h A D1..D256. Programs 1-256 bytes within one 256-byte page (bytes past the page end wrap to its start). Erased bits only go 1 -> 0.";
+              confidence = "CONFIRMED"; ds_ref = "W25Q128JV Rev F, 8.2.13, PDF p.37";
+              fw_writes = "ONLY 0x0002b8a8 spi_flash_page_program_raw: 06h (0x0002b8b2), then 02h built at 0x0002b8b8 with the shadow address 0x0003869c, sent at 0x0002b8e0, data at 0x0002b8ec, then 05h polling. Reached only through 0x0002b900 spi_flash_program_pagesplit (splits at the 256-byte page boundary). Callers of 0x0002b900: flash_page_tag_write 0x0300f2fc, mutex_guarded_param_dispatch_1/2/3 0x0300f7ac/0x03010680/0x03010818, FUN_0300f7dc, flash_block_write 0x0300f878, flash_field_write_cached 0x0300fa28, flash_page_read_modify_write 0x0300fb58, flash_record_commit_3field 0x0300fda4, flash_record_commit_4field 0x030100a8, channel_bitmap_bit_clear 0x03010558, spi_flash_log_append_2byte 0x030105d0, spi_flash_dual_log_reset_with_marker_scan 0x030106b4, flash_write_split_across_page_boundary 0x03010848, channel_list_compact_and_delete_entry 0x03010978, flash_dual_range_invalidate 0x03010b40, tx_contact_index_rewrite_both_blocks 0x03034624, quick_contact_slot_bitmask_mark 0x03034834, contact_edit_save_flow2 0x030350c4, flash_pagesplit_write_with_split_markers 0x030611d4, channel_bitmap_flash_rebuild 0x03061b0c, gps_log_record_append_compact 0x03062d2c, flash_block1_write_zero_word_tagged 0x03062e90, and 0x0002ba5c spi_flash_write_chunk_pagesplit (callers: channel_list_compact_and_delete_entry, codeplug_factory_defaults_write 0x03032434 (17 sites), quick_contact_slot_bitmask_mark, contact_edit_save_flow2, channel_bitmap_flash_rebuild, and 0x0002baac spi_flash_write_multi_sector, whose only caller is the CPS write path serial_protocol_vframe_command_loop_variant at 0x0302a6c0).";
+              destructive = true;
+              opcode_fw_f opcode[7:0] = 0x02; } PAGE_PROGRAM @ 0x02;
+        reg { name = "Quad Input Page Program"; desc = "Frame: 06h, then 32h A, data on IO0-IO3.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.14, PDF p.38";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x32; } QUAD_PAGE_PROGRAM @ 0x32;
+
+        // --- erase
+        reg { name = "Sector Erase (4 KB)"; desc = "Frame: 06h, then 20h A. Erases the 4 KB sector containing A to FFh (tSE). The only erase the stock firmware uses on this chip.";
+              confidence = "CONFIRMED"; ds_ref = "W25Q128JV Rev F, 8.2.15, PDF p.39";
+              fw_writes = "ONLY 0x0002b9b4 spi_flash_cmd_sector_erase_raw: 06h (0x0002b9ba), then 20h built at 0x0002b9c0 with the shadow address 0x0003869c, sent at 0x0002b9e8, then 05h polling (0x0002b9f2). Its only caller is 0x0002b9fc (renamed 2026-10-11 from spi_flash_read_at to spi_flash_sector_erase; it ERASES sector N: shadow = N<<12, then 0x0002b9b4). Callers of 0x0002b9fc: flash_block_id_resolve 0x0300f364, spi_flash_pending_update_scan_and_invalidate 0x0300f3d0 (4 sites), flash_block_id_resolve_helper1 0x0300f5b4 (2, one with sector 0xff), flash_block_id_resolve_helper2 0x0300f6c0, flash_mutex_guarded_op 0x0300f700, spi_flash_dual_log_reset_with_marker_scan 0x030106b4 (3), channel_list_compact_and_delete_entry 0x03010978 (2), flash_dual_range_invalidate 0x03010b40 (2), codeplug_factory_defaults_write 0x03032434 (17 sites: physical sectors 0x04 0x06 0x0a 0x0b 0x0f 0x10 0x11 0x42 0x43 0x44 0x5c 0x65 0x66 0x67 plus three computed from registers), flash_pagesplit_write_with_split_markers 0x030611d4 (2), channel_bitmap_flash_rebuild 0x03061b0c (2), gps_log_record_append_compact 0x03062d2c, flash_block1_write_zero_word_tagged 0x03062e90, and spi_flash_write_multi_sector 0x0002baac at 0x0002baf4 (the CPS write path erases each following sector its write crosses into; the first sector is not erased by it).";
+              destructive = true;
+              opcode_fw_f opcode[7:0] = 0x20; } SECTOR_ERASE @ 0x20;
+        reg { name = "Block Erase (32 KB)"; desc = "Frame: 06h, then 52h A.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.16, PDF p.40";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x52; } BLOCK_ERASE_32K @ 0x52;
+        reg { name = "Block Erase (64 KB)"; desc = "Frame: 06h, then D8h A.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.17, PDF p.41";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0xD8; } BLOCK_ERASE_64K @ 0xD8;
+        reg { name = "Chip Erase (C7h)"; desc = "Frame: 06h, then C7h. Erases the whole 16 MB, including the per-unit calibration page.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.18, PDF p.42";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0xC7; } CHIP_ERASE_C7 @ 0xC7;
+        reg { name = "Chip Erase (60h)"; desc = "Frame: 06h, then 60h. Same as C7h.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.18, PDF p.42";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x60; } CHIP_ERASE_60 @ 0x60;
+        reg { name = "Erase / Program Suspend"; desc = "Frame: 75h.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.19, PDF p.43";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x75; } ERASE_PROGRAM_SUSPEND @ 0x75;
+        reg { name = "Erase / Program Resume"; desc = "Frame: 7Ah.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.20, PDF p.44";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x7A; } ERASE_PROGRAM_RESUME @ 0x7A;
+
+        // --- power, reset, identification
+        reg { name = "Power-down"; desc = "Frame: B9h.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.21, PDF p.45";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0xB9; } POWER_DOWN @ 0xB9;
+        reg { name = "Release Power-down / Device ID"; desc = "Frame: ABh dummy dummy dummy, then ID7-ID0 (17h).";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.22, PDF p.46";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0xAB; } RELEASE_POWER_DOWN_ID @ 0xAB;
+        reg { name = "Manufacturer / Device ID"; desc = "Frame: 90h dummy dummy 00h, then EFh 17h.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.23, PDF p.47";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x90; } MANUFACTURER_DEVICE_ID @ 0x90;
+        reg { name = "Manufacturer / Device ID Dual I/O"; desc = "Frame: 92h (dual I/O).";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.24, PDF p.48";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x92; } MANUFACTURER_DEVICE_ID_DUAL_IO @ 0x92;
+        reg { name = "Manufacturer / Device ID Quad I/O"; desc = "Frame: 94h (quad I/O).";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.25, PDF p.49";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x94; } MANUFACTURER_DEVICE_ID_QUAD_IO @ 0x94;
+        reg { name = "Read Unique ID"; desc = "Frame: 4Bh dummy x4, then UID63-UID0. Read-only and harmless; see id.UNIQUE_ID.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.26, PDF p.50";
+              fw_writes = "Never sent by stock firmware (to this chip or the program flash).";
+              opcode_f opcode[7:0] = 0x4B; } READ_UNIQUE_ID @ 0x4B;
+        reg { name = "Read JEDEC ID"; desc = "Frame: 9Fh, then MF7-MF0 ID15-ID0 (EF 40 18). See id.JEDEC_ID.";
+              confidence = "CONFIRMED"; ds_ref = "W25Q128JV Rev F, 8.2.27, PDF p.51";
+              fw_writes = "Never sent by stock firmware.";
+              hw_reads = "Real radio: returned EF 40 18 on chip select GPIOA 0x12.";
+              opcode_f opcode[7:0] = 0x9F; } READ_JEDEC_ID @ 0x9F;
+        reg { name = "Read SFDP Register"; desc = "Frame: 5Ah 00h 00h A7-A0 dummy, then data.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.28, PDF p.52";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x5A; } READ_SFDP @ 0x5A;
+        reg { name = "Enable Reset"; desc = "Frame: 66h; must immediately precede 99h.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.37, PDF p.60";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x66; } ENABLE_RESET @ 0x66;
+        reg { name = "Reset Device"; desc = "Frame: 99h (after 66h). Volatile status bits revert to their non-volatile values.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.37, PDF p.60";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x99; } RESET_DEVICE @ 0x99;
+
+        // --- security registers (OTP-lockable)
+        reg { name = "Erase Security Register"; desc = "Frame: 06h, then 44h A (A = 0x001000/0x002000/0x003000 for registers 1/2/3). Ignored once the register's LB bit is 1.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.29, PDF p.53; address note 5, PDF p.24";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x44; } ERASE_SECURITY_REGISTER @ 0x44;
+        reg { name = "Program Security Register"; desc = "Frame: 06h, then 42h A D1..D256.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.30, PDF p.54";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x42; } PROGRAM_SECURITY_REGISTER @ 0x42;
+        reg { name = "Read Security Register"; desc = "Frame: 48h A dummy, then data.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.31, PDF p.55";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x48; } READ_SECURITY_REGISTER @ 0x48;
+
+        // --- block locks (WPS = 1)
+        reg { name = "Individual Block/Sector Lock"; desc = "Frame: 36h A.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.32, PDF p.56";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x36; } INDIVIDUAL_LOCK @ 0x36;
+        reg { name = "Individual Block/Sector Unlock"; desc = "Frame: 39h A.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.33, PDF p.57";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x39; } INDIVIDUAL_UNLOCK @ 0x39;
+        reg { name = "Read Block/Sector Lock"; desc = "Frame: 3Dh A, then L7-L0.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.34, PDF p.58";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x3D; } READ_BLOCK_LOCK @ 0x3D;
+        reg { name = "Global Block/Sector Lock"; desc = "Frame: 7Eh.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.35, PDF p.59";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x7E; } GLOBAL_LOCK @ 0x7E;
+        reg { name = "Global Block/Sector Unlock"; desc = "Frame: 98h.";
+              confidence = "DATASHEET"; ds_ref = "W25Q128JV Rev F, 8.2.36, PDF p.59";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x98; } GLOBAL_UNLOCK @ 0x98;
+    } cmd @ 0x100;
+};

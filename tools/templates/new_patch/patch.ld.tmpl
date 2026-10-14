@@ -1,0 +1,41 @@
+/*
+ * __PATCH_NAME__.ld -- linker script (scaffolded by new_patch.py; same shape as
+ * tools/link/example/hello_patch.ld). build_manifest_patch.py links with
+ * `-L <build dir> -L tools/link -L <this dir>`, so the INCLUDEs below resolve.
+ *
+ * DEVELOPMENT (as generated): code goes in PATCH_FLASH and state in PATCH_SRAM. These are the largest
+ * free regions that are not claimed by any patch in data/allocations.json, and the builder warns
+ * on every build that the patch has no claim yet.
+ *
+ * BEFORE STAGING FOR A RADIO: claim whole 4 KiB flash sectors (plus an SRAM range) for this patch
+ * in data/allocations.json, run gen_link_artifacts.py, and list the claim names under
+ * "allocations" in __PATCH_NAME__.patch.json. Then replace the first INCLUDE with
+ *     INCLUDE dm32_patch_own_memory.ld
+ * which the builder generates from those claims, and change `> PATCH_FLASH` / `> PATCH_SRAM` to
+ * `> PATCH_OWN_FLASH` / `> PATCH_OWN_SRAM`. The two memory files cannot be combined:
+ * dm32_patch_memory.ld reserves every claim, including this patch's own.
+ */
+INCLUDE dm32_patch_memory.ld
+INCLUDE dm32_stock_symbols.ld
+
+ENTRY(__PATCH_NAME___entry)
+
+SECTIONS
+{
+    /* The entry point goes first, by name. GCC's emission order is not source order (Snake's
+     * mode-126 freeze). This needs -ffunction-sections; KEEP survives --gc-sections. */
+    .text : {
+        KEEP(*(.text.__PATCH_NAME___entry))
+        *(.text .text.*)
+        *(.rodata .rodata.*)
+    } > PATCH_FLASH
+
+    .bss (NOLOAD) : {
+        *(.bss .bss.*)
+        *(COMMON)
+    } > PATCH_SRAM
+
+    /* Nothing copies initialised RAM data from flash at boot, so a patch cannot have any. */
+    .data : { *(.data .data.*) } > PATCH_SRAM
+    ASSERT(SIZEOF(.data) == 0, "patch has initialised writable data (.data): nothing copies it to RAM; make it const or zero-initialised")
+}

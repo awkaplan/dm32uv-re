@@ -1,0 +1,41 @@
+{
+  "generic": [
+    {
+      "path": "data/firmware/patching/progmem_stock_DP570UV_20260926_FULL.bin",
+      "offset": 0,
+      "length": 1048576,
+      "note": "Whole 1 MB program-flash read of DM32.00.01.048, per-unit sector blanked (read-only input)",
+      "expect": {
+        "is_full_image": true,
+        "header.entry": "0x3001000",
+        "header.has_txd_magic": true,
+        "header.word_0x20": "0xffffffff",
+        "entry_stub_pool.iram_src": "0x3001f48",
+        "entry_stub_pool.iram_size": "0x2a60",
+        "app_stub_pool.vbr": "0x10000",
+        "app_stub_pool.sram_src": "0x3072000",
+        "app_stub_pool.iram_src": "0x30bfc20",
+        "app_stub_pool.iram_size": "0x1f098",
+        "app_stub_pool.bss_end": "0x4a7b0",
+        "iram_load_image_present": true,
+        "trailer_present": true
+      }
+    },
+    {
+      "path": "data/firmware/DM32.00.01.048.bin",
+      "offset": 0,
+      "length": 860416,
+      "note": "The same image cut at 0xd2100 (read-only input); ends inside the IRAM load image",
+      "expect": {
+        "is_cut_image": true,
+        "header.entry": "0x3001000",
+        "app_stub_pool.iram_src": "0x30bfc20",
+        "iram_load_image_present": false,
+        "trailer_present": false
+      }
+    }
+  ],
+  "private_globs": [
+    "program-flash/*.bin"
+  ]
+}

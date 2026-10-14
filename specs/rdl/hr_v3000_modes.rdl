@@ -1,0 +1,127 @@
+// hr_v3000_modes.rdl - the HR_V3000 vocoder's two 16-bit mode words, ECMODE (encoder) and
+// DCMODE (decoder). They are not memory-mapped: the host sends each one as the parameter of a
+// UART control packet, `61 00 03 00 <code> <hi> <lo>`, with code 0x05 (ECMODE) or 0x06 (DCMODE),
+// high byte first; the vocoder answers `61 00 01 00 <code>`. `wire_addr` is that command code.
+// Frame format: specs/ksy/hr_v3000.ksy.
+//
+// SOURCE: HR_V3000 声码器使用说明文档 (HR_V3000 vocoder user manual) v1.2, 2013-09-11, Zhejiang
+// Hongrui Communication Technology, section 5 (mode-word tables p.13-14) and 5.1-5.4 (p.14-17).
+// A set bit enables a function; reserved bits must be written 0 (section 5, p.13).
+//
+// DVSI. The same field IDs and most of the same bit positions are DVSI's AMBE-3000 ECMODE_IN /
+// DCMODE_IN words (DVSI AMBE-3000R Vocoder Chip User's Manual v2.2, Tables 12 and 14, as
+// transcribed in zumspotpy's ambeserver.py, github.com/spectriclabs/zumspotpy, Apache-2.0; no
+// code copied). Matching bits: ECMODE 6 NS_ENABLE, 11 DTX_ENABLE, 12 TD_ENABLE, 14 TS_ENABLE;
+// DCMODE 3 CNI_FRAME, 14 TS_ENABLE. Differing: ECMODE bit 13 is AGC_ON here and EC_ENABLE (echo
+// canceller) for DVSI; DVSI's ECMODE bits 7-9 (CP_SELECT, CP_ENABLE, ES_ENABLE) and DCMODE bits 2
+// (LOST_FRAME), 7, 8 (CP_SELECT, CP_ENABLE) are reserved in the HR_V3000 tables.
+//
+// STOCK FIRMWARE. DM32.00.01.048 contains no HR_V3000 driver, so nothing here has an fw_writes:
+// no frame template and no frame builder exists in the program flash or the IRAM image, and the
+// only non-console UART (UART1, gps_uart1_init_9600 @0x0301d96c, 9600 baud) talks to the GPS
+// receiver ($PCAS strings @0x03081e10). The DM-32 uses the HR_C7000's built-in vocoder (HR_C7000
+// v2.7 en, 7.1.1, p.473). Evidence in full: the top-level doc of specs/ksy/hr_v3000.ksy.
+// The example values quoted below are the manual's own (section 4.2.1 and 5.x), not stock writes.
+
+`include "dm32_udp.rdl"
+
+addrmap hr_v3000_modes {
+    name = "HR_V3000 vocoder mode words";
+    desc = "ECMODE and DCMODE, sent over UART as control packets 0x05 / 0x06. Not memory-mapped: the addresses here are only an ordering; wire_addr is the command code.";
+    ds_ref = "HR_V3000 manual v1.2, 5, p.13-14";
+    confidence = "DATASHEET";
+    default regwidth = 16;
+    default accesswidth = 16;
+    default sw = w;
+    default hw = r;
+
+    reg {
+        name = "ECMODE";
+        desc = "Encoder mode word, command 0x05, parameter length 2 (frame Length 3, ACK Length 1). Manual examples: 0x1840 (4.2.1, p.13: tone detect + DTX + NS), 0x1040 (5.1.2, p.14: DTX off), 0x1000 (5.2.2, p.15: NS off as well), 0x4000 (5.3.2, p.16: DTMF send), 0x3840 (5.4.2, p.17: AGC on). Same field ID as DVSI PKT_ECMODE.";
+        ds_ref = "HR_V3000 manual v1.2, 4.2.1 command table p.12; 5 ECMODE table p.13-14; A.1 p.22";
+        confidence = "DATASHEET";
+        wire_addr = 0x05;
+
+        field {
+            desc = "Reserved, write 0.";
+            ds_ref = "HR_V3000 manual v1.2, 5 ECMODE table, p.13";
+            confidence = "DATASHEET";
+        } reserved_15[15:15] = 0;
+        field {
+            name = "DTMF_SEND";
+            desc = "1 = the encoder ignores speech and encodes the tone selected by ENC_TONE_INDEX (0xae) at ENC_TONE_LEVEL (0xaf). Must be 0 for normal speech. DVSI name TS_ENABLE (tone send). Default not stated.";
+            ds_ref = "HR_V3000 manual v1.2, 5 ECMODE table p.13; 5.3.1-5.3.2 p.15-16";
+            confidence = "DATASHEET";
+        } dtmf_send[14:14];
+        field {
+            name = "AGC_ON";
+            desc = "1 = input AGC on: aims at SET_DBM0_LEVEL (0xab, default -22 dBm0) within MIN_DB_GAIN (0xad, default -10 dB) .. MAX_DB_GAIN (0xac, default 20 dB). Default not stated. DIFFERS FROM DVSI: bit 13 there is EC_ENABLE, the echo canceller.";
+            ds_ref = "HR_V3000 manual v1.2, 5 ECMODE table p.13; 5.4.1-5.4.2 p.16-17";
+            confidence = "DATASHEET";
+        } agc_on[13:13];
+        field {
+            name = "TONE_DET_ENABLE";
+            desc = "1 = single- and dual-tone detection on. Set in every manual example except the DTMF-send one. Default not stated. DVSI name TD_ENABLE.";
+            ds_ref = "HR_V3000 manual v1.2, 5 ECMODE table, p.13";
+            confidence = "DATASHEET";
+        } tone_det_enable[12:12];
+        field {
+            name = "DTX_ENABLE";
+            desc = "1 = discontinuous transmission: during speech gaps the encoder emits a standard silence frame, which a receiving decoder replaces with comfort noise. DVSI name DTX_ENABLE.";
+            ds_ref = "HR_V3000 manual v1.2, 5 ECMODE table p.13; 5.1.1-5.1.2 p.14 (default 1)";
+            confidence = "DATASHEET";
+        } dtx_enable[11:11] = 1;
+        field {
+            desc = "Reserved, write 0.";
+            ds_ref = "HR_V3000 manual v1.2, 5 ECMODE table, p.13";
+            confidence = "DATASHEET";
+        } reserved_10_7[10:7] = 0;
+        field {
+            name = "NS_ENABLE";
+            desc = "1 = background noise suppression on speech and silence frames (not on tone/DTMF frames); takes a few seconds to take effect after being set. DVSI name NS_ENABLE.";
+            ds_ref = "HR_V3000 manual v1.2, 5 ECMODE table p.13; 5.2.1-5.2.2 p.15 (default 1)";
+            confidence = "DATASHEET";
+        } ns_enable[6:6] = 1;
+        field {
+            desc = "Reserved, write 0.";
+            ds_ref = "HR_V3000 manual v1.2, 5 ECMODE table, p.13";
+            confidence = "DATASHEET";
+        } reserved_5_0[5:0] = 0;
+    } ecmode @ 0x0;
+
+    reg {
+        name = "DCMODE";
+        desc = "Decoder mode word, command 0x06, parameter length 2 (frame Length 3, ACK Length 1). Manual examples: 0x0008 (5.1.2, p.14: continuous comfort noise), 0x4000 (5.3.2, p.16: play a tone). Same field ID as DVSI PKT_DCMODE.";
+        ds_ref = "HR_V3000 manual v1.2, 4.2.1 command table p.12; 5 DCMODE table p.14; A.1 p.22";
+        confidence = "DATASHEET";
+        wire_addr = 0x06;
+
+        field {
+            desc = "Reserved, write 0.";
+            ds_ref = "HR_V3000 manual v1.2, 5 DCMODE table, p.14";
+            confidence = "DATASHEET";
+        } reserved_15[15:15] = 0;
+        field {
+            name = "DTMF_SEND";
+            desc = "1 = the decoder ignores coded input and plays the tone selected by DEC_TONE_INDEX (0xb0) at DEC_TONE_LEVEL (0xb1). Must be 0 for normal decoding. DVSI name TS_ENABLE. Default not stated.";
+            ds_ref = "HR_V3000 manual v1.2, 5 DCMODE table p.14; 5.3.1-5.3.2 p.15-16";
+            confidence = "DATASHEET";
+        } dtmf_send[14:14];
+        field {
+            desc = "Reserved, write 0. DVSI uses bits 7-8 (CP_SELECT, CP_ENABLE) here.";
+            ds_ref = "HR_V3000 manual v1.2, 5 DCMODE table, p.14";
+            confidence = "DATASHEET";
+        } reserved_13_4[13:4] = 0;
+        field {
+            name = "CNI_FRAME";
+            desc = "1 = the decoder outputs comfort noise continuously. Off by default because with it on the decoder never stops producing noise. DVSI name CNI_FRAME.";
+            ds_ref = "HR_V3000 manual v1.2, 5 DCMODE table p.14; 5.1.1-5.1.2 p.14 (default 0)";
+            confidence = "DATASHEET";
+        } cni_frame[3:3] = 0;
+        field {
+            desc = "Reserved, write 0. DVSI uses bit 2 (LOST_FRAME) here.";
+            ds_ref = "HR_V3000 manual v1.2, 5 DCMODE table, p.14";
+            confidence = "DATASHEET";
+        } reserved_2_0[2:0] = 0;
+    } dcmode @ 0x2;
+};

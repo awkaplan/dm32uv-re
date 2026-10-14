@@ -1,0 +1,14 @@
+[submodule "vendor/ghidra_csky"]
+	path = vendor/ghidra_csky
+	url = https://github.com/awkaplan/ghidra_csky.git
+[submodule "vendor/dm32uv-qemu"]
+	path = vendor/dm32uv-qemu
+	url = https://github.com/awkaplan/dm32uv-qemu.git
+[submodule "vendor/csky-qemu"]
+	path = vendor/csky-qemu
+	url = https://github.com/awkaplan/csky-qemu.git
+	branch = main
+[submodule "vendor/csky-toolchain-build"]
+	path = vendor/csky-toolchain-build
+	url = https://github.com/awkaplan/csky-toolchain-build.git
+	branch = master

@@ -1,0 +1,31 @@
+// dm32_udp.rdl - user-defined properties that carry EVIDENCE on every register and field in this
+// repo's SystemRDL files. `include "dm32_udp.rdl"` at the top of each chip file.
+//
+// Rules (see ../README.md): every reg and every field carries a `confidence`, and every claim
+// carries at least one of the evidence properties below. Nothing is invented: a value or meaning
+// with no source is left out, or marked confidence = "INFERRED" with the reasoning in `desc`.
+
+// Datasheet citation: document, section and PDF page index, e.g. "W25Q128JV Rev F, 7.1.1 (BUSY), PDF p.14".
+property ds_ref     { type = string;  component = all; };
+// The datasheet's stated reset/default value, verbatim, when it differs from or adds to `reset`.
+property ds_value   { type = string;  component = reg | field; };
+// Stock firmware evidence: where DM32.00.01.048 reads/writes this, and the values it writes,
+// e.g. "writes 0x0002 at 0x03023760 (hr_c7000_modem_core_register_init)".
+property fw_writes  { type = string;  component = reg | field; };
+property fw_reads   { type = string;  component = reg | field; };
+// Live-hardware evidence (a read from a real radio, or a QEMU model behaviour, say which).
+property hw_reads   { type = string;  component = reg | field; };
+// CONFIRMED (hardware or instruction-level trace) / DATASHEET (datasheet only) /
+// STRUCTURAL (consistent pattern, not proven) / INFERRED (reasoned guess, say why in desc).
+property confidence { type = string;  component = all; };
+// For chips without a memory-mapped bus (SPI/I2C/3-wire): the register number on the wire,
+// when `addressof()` does not equal it (e.g. paged or 16-bit-wide register files).
+property wire_addr  { type = longint unsigned; component = reg; };
+// Command-selected registers (SPI/I2C chips): the opcode(s) that WRITE this register, e.g. "01h
+// (SR1+SR2), 31h (SR2)". `wire_addr` holds the opcode that READS it.
+property wr_cmd      { type = string;  component = reg; };
+// Field is stored in non-volatile memory (survives power-off), per the datasheet.
+property nonvolatile { type = boolean; component = field; };
+// A command or register write that destroys stored data (erase, program, status writes that can
+// lock or protect the array). Tools and docs flag every stock call site of these.
+property destructive { type = boolean; component = reg; };

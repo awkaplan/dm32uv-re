@@ -1,0 +1,27 @@
+/*
+ * Decompiler reconstruction for interoperability research; not Baofeng source code.
+ * Source binary: DM32.00.01.048.bin (app region, file offset 0x1000+)
+ *   SHA-256: 0791558d1471415556bcea941e161cd695937edd41b7e8ed38a18bdca2556147
+ * Function: copy_field_and_write_status_mode_0x23_1 @ 0304e030 (file base 0x03000000; code starts at 0x03001000)
+ * Size: 20 bytes
+ * Confidence: STRUCTURAL (inferred from code shape and call context; plausible but unverified)
+ */
+
+
+/* Subsystem: unclassified
+ * Confidence: STRUCTURAL - inferred from code shape and call context; plausible but unverified.
+ *
+ * GENERATED FILE - do not edit; regenerate from the source project.
+ */
+#include "dm32/dm32.h"
+
+/* Confidence: STRUCTURAL - inferred from code shape and call context; plausible but unverified. */
+
+void copy_field_and_write_status_mode_0x23_1(void)
+
+{
+  *(undefined1 *)PTR_DAT_0304e0c8 = *(undefined1 *)p_active_screen_state_word;
+  write_status_mode_byte_pair(0x23,1);
+  return;
+}
+

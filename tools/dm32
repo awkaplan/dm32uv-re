@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""tools/dm32 - one entry point for the dm32_patch_tools scripts.
+
+`tools/dm32 <verb> [args...]` runs the wrapped script from
+tools/src/dm32_patch_tools/ with `python3 <tool> <args...>` and returns its exit
+code, so the wrapper works from any cwd (every tool locates the repo itself).
+Run `tools/dm32 --help` for the verb list, or `tools/dm32 <verb> --help` for a
+wrapped tool's own help (which never re-execs into docker).
+
+Verbs that need the cross-toolchain / QEMU - build, verify, verify-sector, run -
+re-exec inside the docker image when they are invoked outside it: the wrapper
+mounts the repo at /repo, rewrites repo-relative path arguments to their /repo/...
+container paths, and runs `python3 tools/dm32 <verb> <args...>` inside the image.
+Pass --no-docker (or set $DM32_NO_DOCKER) to force a host run; when the image
+cannot be used the wrapper prints what is missing plus the remedy and exits 3.
+verify-sector degrades instead: it still runs the pre-flight on the host, adding
+--skip-dynamic unless the user already passed it.
+
+Single stdlib file, importable without side effects (main runs under __main__).
+"""
+from __future__ import annotations
+
+import os
+import pathlib
+import shlex
+import shutil
+import subprocess
+import sys
+
+# Repo root is the parent of this file's own tools/ directory.
+REPO = pathlib.Path(__file__).resolve().parent.parent
+TOOLS_SRC = REPO / "tools" / "src" / "dm32_patch_tools"
+DEFAULT_IMAGE = "dm32uv-re-pipeline:latest"
+
+VERB_TO_TOOL = {
+    "doctor": "doctor.py",
+    "lookup": "lookup.py",
+    "keyseq": "keyseq_lib.py",
+    "new": "new_patch.py",
+    "build": "build_manifest_patch.py",
+    "lint": "lint_manifest.py",
+    "verify-sector": "verify_patch.py",
+    "verify": "verify_manifest.py",
+    "run": "qemu_run.py",
+    "render": "render_frames.py",
+    "stage": "stage_sectors.py",
+    "disasm": "cs_disasm.py",
+    "scan": "placement_scan.py",
+}
+
+# Verbs that need the cross-toolchain / QEMU, i.e. this repo's docker image.
+IMAGE_VERBS = {"build", "verify", "verify-sector", "run"}
+
+QEMU = "qemu-system-cskyv2"
+CSKY_GCC = "csky-abiv2-elf-gcc"
+
+
+def tool_path(repo: pathlib.Path, verb: str) -> pathlib.Path:
+    """The wrapped tool's script path for a verb (may not exist yet - callers handle that)."""
+    return repo / "tools" / "src" / "dm32_patch_tools" / VERB_TO_TOOL[verb]
+
+
+def needs_image(verb: str) -> bool:
+    """True for verbs that need the cross-toolchain / QEMU (the docker image's job)."""
+    return verb in IMAGE_VERBS
+
+
+def in_image() -> bool:
+    """True when the toolchain and the dm32 QEMU are on PATH (i.e. inside the docker image)."""
+    return shutil.which(QEMU) is not None and shutil.which(CSKY_GCC) is not None
+
+
+def docker_image_name() -> str:
+    """The image to re-exec into: $DM32_IMAGE or the default pipeline image."""
+    return os.environ.get("DM32_IMAGE") or DEFAULT_IMAGE
+
+
+def build_docker_cmd(repo: pathlib.Path, image: str, argv: list[str]) -> list[str]:
+    """The `docker run` command that re-execs `tools/dm32 <argv...>` in the image.
+
+    argv is the verb plus its (already repo-path-rewritten) arguments; the inner
+    command is `python3 tools/dm32 <argv...>` joined with shlex so a single
+    argument string reaches the image's `-c` entry point.
+    """
+    inner = shlex.join(["python3", "tools/dm32", *argv])
+    return ["docker", "run", "--rm", "-v", f"{repo}:/repo", "-w", "/repo",
+            image, "-c", inner]
+
+
+def rewrite_args_for_container(repo: pathlib.Path, argv: list[str]) -> list[str]:
+    """Map host path arguments under the repo root to their /repo/... container paths.
+
+    An argument that is an existing host path below the repo root becomes
+    /repo/<relative path> (the repo is bind-mounted at /repo in the image); every
+    other argument - outside paths, flags, bare words - is left untouched.
+    """
+    repo_resolved = repo.resolve()
+    out = []
+    for a in argv:
+        p = pathlib.Path(a).expanduser()
+        if p.exists():
+            try:
+                rel = p.resolve().relative_to(repo_resolved)
+            except ValueError:
+                out.append(a)  # exists, but outside the repo -> untouched
+            else:
+                out.append(str(pathlib.PurePosixPath("/repo") / rel))
+        else:
+            out.append(a)
+    return out
+
+
+def docker_image_present(image: str | None = None) -> bool:
+    """True when docker is on PATH and `docker images -q <image>` is non-empty."""
+    if shutil.which("docker") is None:
+        return False
+    image = image or docker_image_name()
+    try:
+        r = subprocess.run(["docker", "images", "-q", image],
+                           capture_output=True, text=True)
+    except OSError:
+        return False
+    return r.returncode == 0 and bool(r.stdout.strip())
+
+
+def can_reexec(args: list[str]) -> bool:
+    """Whether an [IMAGE] verb should re-exec inside docker from this environment."""
+    if in_image():
+        return False
+    if "--no-docker" in args:
+        return False
+    if os.environ.get("DM32_NO_DOCKER"):
+        return False
+    return docker_image_present()
+
+
+def run_tool(tool: pathlib.Path, args: list[str]) -> int:
+    """Run a wrapped tool with this interpreter, inheriting stdout/stderr/exit code."""
+    return subprocess.run([sys.executable, str(tool), *args]).returncode
+
+
+def reexec(verb: str, args: list[str]) -> int:
+    """Re-exec `tools/dm32 <verb> <args...>` inside the docker image; returns its exit code."""
+    rewritten = rewrite_args_for_container(REPO, [verb, *args])
+    cmd = build_docker_cmd(REPO, docker_image_name(), rewritten)
+    return subprocess.run(cmd).returncode
+
+
+def missing_remedy(verb: str, args: list[str]) -> str:
+    """Human line(s) explaining why an [IMAGE] verb cannot run, plus the remedy."""
+    lines = [f"error: {verb} needs the toolchain/QEMU image, which is not available here:"]
+    if "--no-docker" in args or os.environ.get("DM32_NO_DOCKER"):
+        lines += [
+            "  --no-docker / $DM32_NO_DOCKER forces a host run, but this host has no",
+            f"  {QEMU} or {CSKY_GCC} on PATH (both come from the image)",
+        ]
+    else:
+        if shutil.which("docker") is None:
+            lines.append("  missing: docker (install it, then build the image)")
+        else:
+            lines.append(f"  missing: docker image {docker_image_name()} (not built)")
+        if not in_image():
+            lines.append(f"  missing: {QEMU} / {CSKY_GCC} on PATH")
+    lines += [
+        "  remedy: build the image: cd docker && docker compose build",
+        "          or pass --no-docker to force a host run",
+    ]
+    return "\n".join(lines)
+
+
+def print_help() -> None:
+    print("Usage: tools/dm32 <verb> [args...]   (run from anywhere; each verb wraps a script in")
+    print("       tools/src/dm32_patch_tools/ and returns its exit code)")
+    print()
+    print("verbs:")
+    rows = [
+        ("doctor", "doctor.py", "check the patch-development environment"),
+        ("lookup", "lookup.py", "what is X? <Q...>"),
+        ("keyseq", "keyseq_lib.py", "named KEYSEQ scenarios / keyseq builders <...>"),
+        ("new", "new_patch.py", "scaffold a patch NAME [...]"),
+        ("build", "build_manifest_patch.py", "build a patch from a manifest [IMAGE]"),
+        ("lint", "lint_manifest.py", "lint a patch manifest"),
+        ("verify-sector", "verify_patch.py", "verify one modded sector [IMAGE]"),
+        ("verify", "verify_manifest.py", "verify a patch build [IMAGE]"),
+        ("run", "qemu_run.py", "run the -M dm32 emulator [IMAGE]"),
+        ("render", "render_frames.py", "render a run's GRAM frames to PNG"),
+        ("stage", "stage_sectors.py", "stage changed sectors for flashing"),
+        ("disasm", "cs_disasm.py", "spot-check disassembly of one function"),
+        ("scan", "placement_scan.py", "is this RAM/flash range safe for patch data?"),
+    ]
+    for verb, tool, desc in rows:
+        print(f"  {verb:<14} {tool:<24} {desc}")
+    print()
+    print("[IMAGE] verbs re-exec inside the docker image "
+          f"({docker_image_name()}, or $DM32_IMAGE) when run outside it;")
+    print("--no-docker / $DM32_NO_DOCKER force a host run. `tools/dm32 <verb> --help` shows")
+    print("the wrapped tool's own help and never re-execs.")
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in ("-h", "--help"):
+        print_help()
+        return 0
+
+    verb, args = argv[0], argv[1:]
+    if verb not in VERB_TO_TOOL:
+        print(f"error: unknown verb {verb!r} (see `tools/dm32 --help`)", file=sys.stderr)
+        return 2
+
+    tool = tool_path(REPO, verb)
+    if not tool.exists():
+        # keyseq/lint/verify may not exist yet; exit 3 rather than crash.
+        print(f"{tool.name} not found", file=sys.stderr)
+        return 3
+
+    # A wrapped tool's own --help must never re-exec into docker.
+    if any(a in ("-h", "--help") for a in args):
+        return run_tool(tool, args)
+
+    if needs_image(verb):
+        if in_image():
+            # Already inside the image: run locally; --no-docker is meaningless here.
+            args = [a for a in args if a != "--no-docker"]
+            return run_tool(tool, args)
+        if can_reexec(args):
+            return reexec(verb, args)
+        if verb == "verify-sector":
+            # Degraded but useful: corpus pre-flight only, no QEMU.
+            if "--skip-dynamic" not in args:
+                args = list(args) + ["--skip-dynamic"]
+            args = [a for a in args if a != "--no-docker"]
+            return run_tool(tool, args)
+        print(missing_remedy(verb, args), file=sys.stderr)
+        return 3
+
+    return run_tool(tool, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,33 @@
+/*
+ * Decompiler reconstruction for interoperability research; not Baofeng source code.
+ * Source binary: DM32.00.01.048.bin (app region, file offset 0x1000+)
+ *   SHA-256: 0791558d1471415556bcea941e161cd695937edd41b7e8ed38a18bdca2556147
+ * Function: call_log_entry_render_basic @ 03052a30 (file base 0x03000000; code starts at 0x03001000)
+ * Size: 68 bytes
+ * Confidence: CONFIRMED (cross-validated against an independent source)
+ */
+
+
+/* Subsystem: unclassified
+ * Confidence: CONFIRMED - cross-validated against an independent source.
+ *
+ * GENERATED FILE - do not edit; regenerate from the source project.
+ */
+#include "dm32/dm32.h"
+
+/* Confidence: CONFIRMED - cross-validated against an independent source. */
+
+void call_log_entry_render_basic(void)
+
+{
+  undefined1 auStack_1c [20];
+  
+  contact_name_lookup_or_format
+            (p_vfo_display_state->flags_0x8 >> 4,*p_text_entry_current_char_alias,auStack_1c,3);
+  display_draw_string_wrapped(0x20,5,p_text_entry_buffer,0);
+  display_clear_status_row(0,0);
+  display_draw_number_centered(1,0xffff,0,(uint)auStack_1c);
+  dialog_header_draw_two_lines();
+  return;
+}
+

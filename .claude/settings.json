@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 tools/src/dm32_patch_tools/lookup.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/cs_disasm.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/placement_scan.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/extract_gb2312_strings.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/check_doc_claims.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/gen_link_artifacts.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/gen_compile_commands.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/gen_patch_api.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/new_patch.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/keyseq_lib.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/fingerprints.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/doctor.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/lint_manifest.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/build_manifest_patch.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/verify_patch.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/verify_manifest.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/compose_qemu_image.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/qemu_run.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/render_frames.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/gdb_rsp.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/pc_histogram.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/stage_sectors.py:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/bps_patch.py:*)",
+      "Bash(python3 dm32:*)",
+      "Bash(python3 tests/run_tests.py:*)",
+      "Bash(make -C tools test:*)",
+      "Bash(make -C tools lookup:*)",
+      "Bash(make -C tools build-manifest:*)",
+      "Bash(make -C tools verify-patch:*)",
+      "Bash(make -C tools link-check:*)",
+      "Bash(make -C tools snake-manifest:*)",
+      "Bash(docker run:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker build:*)"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(git reset:*)",
+      "Bash(git rebase:*)",
+      "Bash(python3 tools/src/dm32_patch_tools/dm32_ramdump.py:*)"
+    ]
+  }
+}

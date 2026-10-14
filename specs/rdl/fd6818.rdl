@@ -1,0 +1,3056 @@
+// fd6818.rdl - FD6818 / FD6818B RF transceiver, as populated on the Baofeng DM-32UV.
+//
+// Hand-maintained. Evidence rules: ../README.md. Companion notes: fd6818.md.
+//
+// THE PART
+//   The board carries an FD6818B (package often marked "FD6818"). The only register document
+//   available is for the FD6818: "FD6818 Programming Guide", REV.1.0.0, 2018, in
+//   Chinese, cited below as "FD6818 PG 1.0.0". It is a vendor document and is not distributed
+//   here. Page numbers are the guide's own printed footers ("56 | 75"); the PDF page index is the
+//   printed number + 3. The register summary table is p.56-72.
+//   Where the FD6818B behaves differently from the guide, the firmware and the hardware win and
+//   the guide's claim is kept in ds_value / desc. Known FD6818B deviations:
+//     - REG_00H chip ID reads 0x4819, not 0x6818.
+//     - The RX/TX/PLL/PA enable word lives at 0x30 (REG_0x30), not REG_03H; stock never touches 0x03.
+//     - REG_28H[15:8] is live GPIO input state, so the register does not read its 0x003F default.
+//     - REG_40H reads dev_sh=4 after soft reset, not the guide's 0x3808.
+//     - REG_7DH: stock puts its selectable gain in [4:0], which the guide calls reserved.
+//     - REG_0CH[15:10] (reserved in the guide) is read by stock as three 2-bit fields.
+//   The FD6818B is an AT1846S derivative at the block level only; AT1846S register addresses do
+//   not apply and are not used here.
+//
+// THE BUS (3-wire, bit-banged on GPIOA: CLK bit 7, DATA bit 8, CS bit 24 / logical pin 0x18)
+//   One transfer: CS low, then 24 bits MSB first: R/W (0 = write, 1 = read), ADDR[6:0],
+//   DATA[15:0] (FD6818 PG 1.0.0, Interface timing, p.15). On a read the master releases DATA
+//   after the address byte; the data bit is sampled while CLK is high.
+//   Stock DM32.00.01.048 primitives (IRAM addresses; persistent copies in program flash at
+//   0x030bfc20 + (addr - 0x10000)):
+//     fd6818b_reg_write(reg, value)  @ 0x0002c2f4  (flash copy 0x030dbf14). Sends the reg byte
+//         unmodified (bit 7 must be 0), then the 16-bit value. 297 call sites (275 in the flash
+//         application, 22 in IRAM); with 42 read sites and 3 wrapper calls, 342 in all, found by
+//         decoding every bsr in both images and matching its target.
+//     fd6818_reg_read(reg)           @ 0x0002c33c  (flash copy 0x030dbf5c). Sends reg | 0x80,
+//         then shifts in 16 bits (fd6818b_shift_in_16bit @ 0x0002c298).
+//     fd6818b_reg_write_wrapper()    @ 0x0300de60. Writes REG_40H only (see there).
+//   Both pend a semaphore (os_sem_pend_ms @ 0x0300c500) around the transfer, post it after
+//   (os_sem_post @ 0x0300c53c), and set GPIOA DDR bit 8 (0x14020004 |= 0x100) first.
+//
+// PAGING
+//   Registers above 0x7F need WRITE(0x7F, 1) first and are then reached at wire address
+//   reg - 0x80; WRITE(0x7F, 0) returns to page 0 (the default). The guide's examples spell a
+//   page-1 access as WRITE(I2C | 0xNN, ...) with I2C = 0x80, i.e. register 0x80 + 0xNN. The
+//   2-wire (I2C-style) interface takes an 8-bit address and needs no paging. REG_7FH is a
+//   write-only command (reads 0). Stock firmware never writes REG_7FH and its write primitive
+//   cannot express a register above 0x7F, so stock uses page 0 only; every page-1 register here
+//   is datasheet-only.
+//   Modelling: two regfiles, page0 @ 0x000 and page1 @ 0x100. Byte address = register number * 2
+//   in both (16-bit registers), so addressof(REG_NNH) / 2 is the guide's register number and
+//   wire_addr is the 7-bit address actually clocked out.
+//
+// NAMING
+//   REG_NNH    the register appears in the guide (summary table, or only in an example; desc says which).
+//   REG_0xNN   the register is not in the guide at all; known only from stock firmware. Its meaning
+//              is given only where the firmware shows one (STRUCTURAL/INFERRED), else "Unknown".
+//   Field names follow the guide. Reserved bits are not modelled as fields (the whole datasheet
+//   default is in the register's ds_value).
+//
+// EVIDENCE
+//   fw_writes on a register lists every stock write as "value at function@site"; sites marked
+//   [unreached] are in functions with no caller (no bsr to them and no pointer to them anywhere in
+//   flash or IRAM), in switch cases of such functions, or on a branch the only caller never takes.
+//   fw_writes on a field lists the field's value in each constant write ("sites on the register").
+//   hw_reads "Real radio" = a DM-32UV running a custom (OpenRTX) build in 2026-10; values that are
+//   per-radio (calibration-derived) are deliberately not recorded. hw_reads "QEMU model" =
+//   vendor/dm32uv-qemu/hw/misc/dm32_fd6818.c, which transcribes the guide's defaults plus the
+//   hardware-observed chip ID; its bus behaviour was verified against a real radio with an
+//   earlier board model, and it is NOT wired into the current board, so it is not independent
+//   evidence for register meanings.
+
+`include "dm32_udp.rdl"
+
+addrmap fd6818 {
+    name = "FD6818B RF transceiver (3-wire)";
+    desc = "FD6818/FD6818B RF transceiver on the DM-32UV: 16-bit registers on a bit-banged 3-wire bus, two pages selected through REG_7FH. Byte address = register number * 2; the on-wire 7-bit address is wire_addr. Page 0 holds registers 0x00-0x7F, page 1 holds 0x80-0xFF. See the header comment for sources and conventions. Bus framing, the chip ID and a write/readback loopback were verified on a real DM-32UV (2026-10).";
+    confidence = "CONFIRMED";
+    ds_ref = "FD6818 PG 1.0.0, Interface timing, p.15; Register summary, p.56-72";
+    default regwidth = 16;
+    default accesswidth = 16;
+
+    regfile {
+        name = "Page 0";
+        desc = "Page 0 (REG_7FH = 0, the power-on default): registers 0x00-0x7F. Every register stock firmware touches is here.";
+        confidence = "DATASHEET";
+        ds_ref = "FD6818 PG 1.0.0, Interface timing, p.15";
+
+        reg {
+            name = "Chip ID / soft reset";
+            desc = "Reads the chip identification code. Writing bit 15 is the soft reset used by the guide's configuration flow (WRITE(0x00,0x8000) then WRITE(0x00,0x0000)), even though the summary table lists REG_00H as read-only; stock firmware issues exactly that pair at the top of its default init. DEVIATION: the populated FD6818B reads 0x4819, not the guide's 0x6818 (hardware wins; no FD6818B datasheet is available, so 0x4819 is empirical). Stock never reads this register.";
+            confidence = "CONFIRMED";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.56; FD6818 PG 1.0.0, Configuration flow, p.16";
+            ds_value = "0x6818";
+            fw_writes = "0x8000 at fd6818b_default_register_init@0x0300ecc0; 0x0000 at fd6818b_default_register_init@0x0300ecc8";
+            hw_reads = "Real radio: 0x4819, 48/48 identical reads across a 32x bus-timing sweep, after a write/readback loopback on REG_3FH proved the bus (2026-10). The QEMU board model returns 0x4819 by default (DM32_FD6818_ID=0x6818 selects the datasheet value).";
+            wire_addr = 0x00;
+            field {
+                sw = r; hw = w;
+                desc = "Chip identification code. 0x4819 on the FD6818B (datasheet FD6818: 0x6818).";
+                confidence = "CONFIRMED";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.56; FD6818 PG 1.0.0, Configuration flow, p.16";
+                ds_value = "0x6818";
+                hw_reads = "see the register's hw_reads";
+            } chip_id[15:0] = 0x4819;
+            field {
+                sw = w; hw = r;
+                desc = "Write 1 then 0 to soft-reset the chip (configuration-flow example). Write-only alias of chip_id[15].";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.56; FD6818 PG 1.0.0, Configuration flow, p.16";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } soft_reset[15:15];
+        } REG_00H @ 0x000;
+
+        reg {
+            name = "Revision ID";
+            desc = "Revision identification code. Never read by stock; not read on hardware.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.56";
+            ds_value = "0x0000";
+            wire_addr = 0x01;
+            field {
+                sw = r; hw = w;
+                desc = "Revision identification code.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.56";
+            } revision_id[15:0] = 0x0;
+        } REG_01H @ 0x002;
+
+        reg {
+            name = "Interrupt vector / interrupt clear";
+            desc = "Read: interrupt vector. Writing any value clears the interrupt (guide GPIO/interrupt section: clear first, then read the vector). Stock does exactly that: writes 0x0000 then reads REG_02H (task_body_uCOS3 0x0300e4f2/0x0300e4f8, tone_gen_config_apply 0x03067e38/0x03067e3e).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.56-57; FD6818 PG 1.0.0, GPIO and interrupt setup, p.50-52";
+            fw_writes = "0x0000 (clear) at task_body_uCOS3@0x0300e4f2, tone_gen_config_apply@0x03067e38; 0x0000 at FUN_03067564@0x030675dc";
+            fw_reads = "read at task_body_uCOS3@0x0300e4f8, tone_gen_config_apply@0x03067e3e";
+            wire_addr = 0x02;
+            field {
+                sw = r; hw = w;
+                desc = "[15:12] DTMF/SELCALL code index; [11:10] CDCSS receive/lost (10 pos rx, 11 neg rx, 00 pos lost, 01 neg lost); [7:6] CTCSS0/1 receive/lost; [5] VOX; [4] SQ; [3:0] source, per the interrupt section (p.51, matching the REG_3FH mask bits): 15 FSK TX done, 14 FIFO almost empty, 13 FSK RX ok, 12 FIFO almost full, 11 header, 10 SyncP, 9 SyncN, 8 DTMF/SELCALL, 7 PLL lock lost, 6 CDCSS, 5 CTCSS, 2 TOT, 1 VOX, 0 SQ. The summary (p.56-57) instead gives 8 PLL lock lost and 4 DTMF/SELCALL.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.56-57; FD6818 PG 1.0.0, GPIO and interrupt setup, p.50-52";
+                fw_reads = "read by stock; sites on the register";
+            } irq_vector[15:0];
+            field {
+                sw = w; hw = r;
+                desc = "Any write clears the pending interrupt.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.56-57; FD6818 PG 1.0.0, GPIO and interrupt setup, p.50-52";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+            } irq_clear[15:0];
+        } REG_02H @ 0x004;
+
+        reg {
+            name = "Enable bits (FD6818 only)";
+            desc = "FD6818 RX/TX/PLL/PA enable bitfield (RXON 0xBFF1, TXON 0xC1FE, IDLE 0x0000 per the guide). DEVIATION: stock firmware NEVER writes or reads 0x03 (complete call-site sweep); on the FD6818B the same bit layout lives at REG_0x30 (see there). Whether 0x03 exists at all on the FD6818B is unknown.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            ds_value = "0x0000";
+            wire_addr = 0x03;
+            field {
+                sw = rw; hw = r;
+                desc = "0->1 starts PLL calibration.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            } vco_cal_en[15:15] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable PABIAS output.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            } pabias_en[14:14] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "All four RX blocks (LNA, mixer, filter, ADC) on when 1111.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            } rxlink_en[13:10] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable AFOUT DAC.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            } afout_en[9:9] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "11111 = enable PLL and VCO.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            } pll_en[8:4] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable PA driver.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            } padrv_en[3:3] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable MICIN ADC.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            } micin_en[2:2] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable TX DSP.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            } txon[1:1] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable RX DSP.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            } rxon[0:0] = 0x0;
+        } REG_03H @ 0x006;
+
+        reg {
+            name = "Function enables";
+            desc = "Never written by stock (calibration/FSK/DTMF enables stay at reset).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            ds_value = "0x0000";
+            wire_addr = 0x04;
+            field {
+                sw = rw; hw = r;
+                desc = "0->1 enables ADC calibration.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            } adc_cal_en[9:9] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "0->1 enables offset calibration (config flow sets [9:8] together, waits 50 ms, then idles).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            } offset_cal_en[8:8] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = disable peak detection.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            } pkd_disable[7:7] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable TOT detection.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            } tot_en[6:6] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable scrambler.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            } scramb_en[5:5] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable FSK mode.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            } fsk_en[4:4] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable AM demodulation.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            } amdem_en[3:3] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable VOX detection.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            } vox_en[2:2] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable DTMF/SELCALL.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            } dtmf_en[1:1] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = enable MCBSP/I2S.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Configuration flow, p.16";
+            } mcbsp_en[0:0] = 0x0;
+        } REG_04H @ 0x008;
+
+        reg {
+            name = "CTCSS frequency word";
+            desc = "CTCSS/CDCSS-rate control word. Stock computes it in fd6818b_program_divider's caller (rf_channel_frequency_apply) as round(f * 2.064888 + 0.5) with f in 0.1 Hz, the constant stored as a double at flash 0x0307694c; 2.064888 = 2^27/65,000,000, i.e. exactly the guide's freq(Hz)*2^27/6.5e6 with a 0.1 Hz input. It also writes 0x0ad7 (the guide's '134.4 Hz DCS rate' value) on the CDCSS path. CORRECTS an earlier reading of this path as an FM-tuner PLL divider: it is this register.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+            fw_writes = "round(f_0.1Hz * 2.064888) (rf_channel_frequency_apply; also 0x008e, 0x0ad7 passed in) at fd6818b_program_divider@0x0300e7e6; arg | 0x2000 at param_set_bit_0x2000@0x0300e7f4; 0x046f at config_table_entry_0300e8b0@0x0300e8b6";
+            wire_addr = 0x07;
+            field {
+                sw = w; hw = r;
+                desc = "1 = CTCSS1 (tail tone) / CDCSS, 0 = CTCSS0 / CDCSS.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+            } ctc_sel1[13:13];
+            field {
+                sw = w; hw = r;
+                desc = "freq(Hz) * 2^27 / 6500000.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.57; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+                fw_writes = "values written by stock: 0x46f (plus computed values); sites on the register";
+            } ctc_freq[12:0];
+        } REG_07H @ 0x00e;
+
+        reg {
+            name = "CDCSS code";
+            desc = "Written twice per code: low 12 bits with [15]=0, then high 12 bits with [15]=1 (guide example and stock fd6818b_write_cdcss_code_reg08 agree; its former name fd6818b_write_freq_reg8 was a misnomer).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+            fw_writes = "CDCSS code, low 12 bits at fd6818b_write_cdcss_code_reg08@0x0300e804; CDCSS code high 12 bits | 0x8000 at fd6818b_write_cdcss_code_reg08@0x0300e80e";
+            wire_addr = 0x08;
+            field {
+                sw = w; hw = r;
+                desc = "1 = high 12 bits, 0 = low 12 bits.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } dcs_half[15:15];
+            field {
+                sw = w; hw = r;
+                desc = "CDCSS 23/24-bit code, 12 bits at a time.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } dcs_code[11:0];
+        } REG_08H @ 0x010;
+
+        reg {
+            name = "DTMF/SELCALL detector coefficients";
+            desc = "Indexed coefficient write: [15:12] index, [7:0] coefficient. Stock loads 16 entries (fd6818b_dtmf_coefficient_table_load writes 0x006f..0xf09f; fd6818b_channel_table_register_program writes (i<<12)|coef(i)). All constant stock values have [11:8] = 0.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, 1050 Hz tone decode, p.32";
+            fw_writes = "0x006f at fd6818b_dtmf_coefficient_table_load@0x0300f06e; 0x106b at fd6818b_dtmf_coefficient_table_load@0x0300f078; 0x2067 at fd6818b_dtmf_coefficient_table_load@0x0300f082; 0x3062 at fd6818b_dtmf_coefficient_table_load@0x0300f08c; 0x4050 at fd6818b_dtmf_coefficient_table_load@0x0300f096; 0x5047 at fd6818b_dtmf_coefficient_table_load@0x0300f0a0; 0x603a at fd6818b_dtmf_coefficient_table_load@0x0300f0aa; 0x702c at fd6818b_dtmf_coefficient_table_load@0x0300f0b4; 0x8041 at fd6818b_dtmf_coefficient_table_load@0x0300f0be; 0x9037 at fd6818b_dtmf_coefficient_table_load@0x0300f0c8; 0xa025 at fd6818b_dtmf_coefficient_table_load@0x0300f0d2; 0xb017 at fd6818b_dtmf_coefficient_table_load@0x0300f0dc; 0xc0e4 at fd6818b_dtmf_coefficient_table_load@0x0300f0e6; 0xd0cb at fd6818b_dtmf_coefficient_table_load@0x0300f0f0; 0xe0b5 at fd6818b_dtmf_coefficient_table_load@0x0300f0fa; 0xf09f at fd6818b_dtmf_coefficient_table_load@0x0300f104; (i << 12) | coef(i), i = 0..15 at fd6818b_channel_table_register_program@0x030645ca; coefficient word at FUN_03067224@0x03067250, FUN_03067224@0x0306725c, FUN_03067224@0x03067268, FUN_03067224@0x03067274";
+            wire_addr = 0x09;
+            field {
+                sw = w; hw = r;
+                desc = "Coefficient index.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, 1050 Hz tone decode, p.32";
+                fw_writes = "values written by stock: 0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf (plus computed values); sites on the register";
+            } coef_index[15:12];
+            field {
+                sw = w; hw = r;
+                desc = "Coefficient for DTMF/SELCALL detection.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, 1050 Hz tone decode, p.32";
+                fw_writes = "values written by stock: 0x17, 0x25, 0x2c, 0x37, 0x3a, 0x41, 0x47, 0x50, 0x62, 0x67, 0x6b, 0x6f, 0x9f, 0xb5, 0xcb, 0xe4 (plus computed values); sites on the register";
+            } coef[7:0];
+        } REG_09H @ 0x012;
+
+        reg {
+            name = "REG_0x0A (undocumented, read)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Stock reads it only in FUN_0300eddc, which has no caller (tests bit (6-i) after setting REG_0x33 bit (14-i)). The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_reads = "read at FUN_0300eddc@0x0300edfa [unreached]";
+            wire_addr = 0x0a;
+            field {
+                sw = r; hw = w;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } value[15:0];
+        } REG_0x0A @ 0x014;
+
+        reg {
+            name = "DTMF/SELCALL received code";
+            desc = "Stock reads it in circular_buffer_append_3bit_status and uart_rx_frame_assemble_polarity_correct.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, DTMF mode setup, p.29";
+            fw_reads = "read at circular_buffer_append_3bit_status@0x030640ee, uart_rx_frame_assemble_polarity_correct@0x03067980";
+            wire_addr = 0x0b;
+            field {
+                sw = r; hw = w;
+                desc = "1 = symbol received.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, DTMF mode setup, p.29";
+                fw_reads = "read by stock; sites on the register";
+            } dtmf_code_ready[12:12];
+            field {
+                sw = r; hw = w;
+                desc = "Received DTMF/SELCALL symbol.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, DTMF mode setup, p.29";
+                fw_reads = "read by stock; sites on the register";
+            } dtmf_code[11:8];
+        } REG_0BH @ 0x016;
+
+        reg {
+            name = "Status";
+            desc = "Status flags. Hardware: during RX at 430 MHz on a real radio REG_0CH read 0x0280 (pll_lock=1, weak_rssi=1, no signal) with the PLL locked, and 0x0080 while a wrong-order frequency write left the PLL unlocked. DEVIATION/OPEN: stock also reads [11:10], [13:12] and [15:14], which the guide marks reserved (hw_status_bit10_read 0x0300eb54, 0x0300eb64, hw_status_bit14_read 0x0300eb74); their meaning on the FD6818B is unknown. The QEMU model derives pll_lock from REG_0x30[0].";
+            confidence = "CONFIRMED";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+            fw_reads = "read at reg_0xc_bit1_read@0x0300eb48, hw_status_bit10_read@0x0300eb58, hw_status_bit14_read@0x0300eb78, FUN_0300eb84@0x0300eb88 [unreached], tone_gen_config_apply@0x03067e28, (unnamed, 0x0300eb64)@0x0300eb68 [unreached]";
+            hw_reads = "Real radio: 0x0280 (locked, no signal), 0x0080 (unlocked).";
+            wire_addr = 0x0c;
+            field {
+                sw = r; hw = w;
+                desc = "Reserved in the guide; stock reads it (hw_status_bit14_read). Meaning unknown.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+                fw_reads = "hw_status_bit14_read@0x0300eb78";
+            } rsvd_15_14[15:14];
+            field {
+                sw = r; hw = w;
+                desc = "Reserved in the guide; stock reads it (unnamed helper at 0x0300eb64, no caller found). Meaning unknown.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+                fw_reads = "0x0300eb68 [unreached]";
+            } rsvd_13_12[13:12];
+            field {
+                sw = r; hw = w;
+                desc = "Reserved in the guide; stock reads it (hw_status_bit10_read). Meaning unknown.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+                fw_reads = "hw_status_bit10_read@0x0300eb58";
+            } rsvd_11_10[11:10];
+            field {
+                sw = r; hw = w;
+                desc = "1 = PLL locked, 0 = lock lost.";
+                confidence = "CONFIRMED";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+                fw_reads = "read by stock; sites on the register";
+                hw_reads = "Real radio: 1 when tuned correctly, 0 with the high frequency word written first.";
+            } pll_lock[9:9];
+            field {
+                sw = r; hw = w;
+                desc = "1 = AFC railed.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+                fw_reads = "read by stock; sites on the register";
+            } afc_rail[8:8];
+            field {
+                sw = r; hw = w;
+                desc = "1 = signal too weak.";
+                confidence = "CONFIRMED";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+                fw_reads = "read by stock; sites on the register";
+                hw_reads = "Real radio: 1 with no signal present.";
+            } weak_rssi[7:7];
+            field {
+                sw = r; hw = w;
+                desc = "TOT output.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+                fw_reads = "read by stock; sites on the register";
+            } tot_out[3:3];
+            field {
+                sw = r; hw = w;
+                desc = "VOX result.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+                fw_reads = "FUN_0300eb84@0x0300eb88 [unreached]";
+            } vox_out[2:2];
+            field {
+                sw = r; hw = w;
+                desc = "Squelch result.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+                fw_reads = "reg_0xc_bit1_read@0x0300eb48";
+            } sq_out[1:1];
+            field {
+                sw = r; hw = w;
+                desc = "Interrupt output.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, SQ / VOX / AFC / interrupt sections, p.46-50";
+                fw_reads = "tone_gen_config_apply@0x03067e28 (polls bit 0)";
+            } int_out[0:0];
+        } REG_0CH @ 0x018;
+
+        reg {
+            name = "REG_0x0D (undocumented, read)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). fd6818b_status_register_poll_with_reinit (called from main_ui_background_task_loop) reads it, treats [15]=1 as not-ready, accepts [10:0] only inside a band-dependent window (0x0cf..0x10a or 0x262..0x2dc, chosen by a radio-state flag), stores [10:0], then reads REG_0x0E and writes REG_0x32=0x0244; after 200 failed polls it pulses REG_0x32 0x0244 -> 0x0245. Looks like a measurement result started by REG_0x32 bit 0; what it measures is unknown.";
+            confidence = "STRUCTURAL";
+            fw_reads = "read at fd6818b_status_register_poll_with_reinit@0x0300eed4";
+            wire_addr = 0x0d;
+            field {
+                sw = r; hw = w;
+                desc = "Treated by stock as 'result not valid'.";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } not_ready[15:15];
+            field {
+                sw = r; hw = w;
+                desc = "Result value, range-checked by stock.";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } value[10:0];
+        } REG_0x0D @ 0x01a;
+
+        reg {
+            name = "REG_0x0E (undocumented, read)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Read and stored as a full 16-bit value right after a valid REG_0x0D result. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_reads = "read at fd6818b_status_register_poll_with_reinit@0x0300eef0";
+            wire_addr = 0x0e;
+            field {
+                sw = r; hw = w;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } value[15:0];
+        } REG_0x0E @ 0x01c;
+
+        reg {
+            name = "REG_0x10 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written only by the RF mode table (fd6818b_mode_register_table_apply, mode 0 from fd6818b_default_register_init; the mode-1 branch is never taken by stock) and by fd6818b_default_register_init itself, together with REG_13H/0x49/0x7b. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x007a at fd6818b_mode_register_table_apply@0x0300e714, fd6818b_default_register_init@0x0300ed40; 0x031a at fd6818b_mode_register_table_apply@0x0300e75a [unreached]";
+            wire_addr = 0x10;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x7a, 0x31a; sites on the register";
+            } value[15:0];
+        } REG_0x10 @ 0x020;
+
+        reg {
+            name = "REG_0x11 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written only by the RF mode table (fd6818b_mode_register_table_apply, mode 0 from fd6818b_default_register_init; the mode-1 branch is never taken by stock) and by fd6818b_default_register_init itself, together with REG_13H/0x49/0x7b. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x027b at fd6818b_mode_register_table_apply@0x0300e70c, fd6818b_default_register_init@0x0300ed4a; 0x035b at fd6818b_mode_register_table_apply@0x0300e750 [unreached]";
+            wire_addr = 0x11;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x27b, 0x35b; sites on the register";
+            } value[15:0];
+        } REG_0x11 @ 0x022;
+
+        reg {
+            name = "REG_0x12 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written only by the RF mode table (fd6818b_mode_register_table_apply, mode 0 from fd6818b_default_register_init; the mode-1 branch is never taken by stock) and by fd6818b_default_register_init itself, together with REG_13H/0x49/0x7b. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x037b at fd6818b_mode_register_table_apply@0x0300e702, fd6818b_default_register_init@0x0300ed54; 0x0b7c at fd6818b_mode_register_table_apply@0x0300e746 [unreached]";
+            wire_addr = 0x12;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x37b, 0xb7c; sites on the register";
+            } value[15:0];
+        } REG_0x12 @ 0x024;
+
+        reg {
+            name = "AGC gain step (FD6818B)";
+            desc = "The guide only writes 0x03FF here in its VCO-mode example (no field layout). Stock's rf_agc_step_adaptive_control_loop writes REG_13H from a 3-byte-per-entry step table at flash 0x030ad934 (value lo, value hi, signed offset; entry 0 = 0x03be, the init value), so on the FD6818B it behaves as an RX gain/AGC step code.";
+            confidence = "STRUCTURAL";
+            ds_ref = "FD6818 PG 1.0.0, DISC baseband mode, p.36";
+            fw_writes = "0x03be at fd6818b_mode_register_table_apply@0x0300e6f8, fd6818b_mode_register_table_apply@0x0300e73c [unreached], fd6818b_default_register_init@0x0300ed5e; 0x037e at fd6818b_default_register_init@0x0300ed14, config_table_entry_0300f15c@0x0300f164; 0x03ff at config_table_init_group1_variant_0300f130@0x0300f14a; AGC step table entry (lo | hi<<8), table at 0x030ad934, 3 bytes/entry at rf_agc_step_adaptive_control_loop@0x0301c168";
+            wire_addr = 0x13;
+            field {
+                sw = rw; hw = r;
+                desc = "AGC step code; 0x03be at init.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, DISC baseband mode, p.36";
+                fw_writes = "values written by stock: 0x37e, 0x3be, 0x3ff (plus computed values); sites on the register";
+            } value[15:0];
+        } REG_13H @ 0x026;
+
+        reg {
+            name = "REG_0x14 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written only by the RF mode table (fd6818b_mode_register_table_apply, mode 0 from fd6818b_default_register_init; the mode-1 branch is never taken by stock) and by fd6818b_default_register_init itself, together with REG_13H/0x49/0x7b. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x0019 at fd6818b_mode_register_table_apply@0x0300e71c, fd6818b_default_register_init@0x0300ed66; 0x0258 at fd6818b_mode_register_table_apply@0x0300e764 [unreached]";
+            wire_addr = 0x14;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x19, 0x258; sites on the register";
+            } value[15:0];
+        } REG_0x14 @ 0x028;
+
+        reg {
+            name = "MIC PGA gain";
+            desc = "Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, TX block diagram (1), p.3-4";
+            ds_value = "0x4125";
+            wire_addr = 0x18;
+            field {
+                sw = rw; hw = r;
+                desc = "MIC PGA gain code (relative-gain table on p.3-4; 01000 default).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, TX block diagram (1), p.3-4";
+            } mic_pga_gain[15:11] = 0x8;
+        } REG_18H @ 0x030;
+
+        reg {
+            name = "PA bias output";
+            desc = "PA bias DAC: 16 steps, 1.3-2.8 V at 100 mV/step. Never written by stock (complete sweep), so the stock radio leaves it at reset; TX power control on this board is reached some other way.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, TX power setup, p.23";
+            ds_value = "0x900F";
+            wire_addr = 0x19;
+            field {
+                sw = rw; hw = r;
+                desc = "0000 = 1.3 V ... 1111 = 2.8 V, 100 mV/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.58; FD6818 PG 1.0.0, TX power setup, p.23";
+            } pabias_out[3:0] = 0xf;
+        } REG_19H @ 0x032;
+
+        reg {
+            name = "Band select";
+            desc = "Appears only in the guide's band table (values per band, e.g. 0x2f50 for 370-560 MHz, 0xaf28 for 124-186 MHz). Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Band/frequency/bandwidth setup, band table, p.21";
+            wire_addr = 0x1a;
+            field {
+                sw = rw; hw = r;
+                desc = "Band code from the guide's band table.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Band/frequency/bandwidth setup, band table, p.21";
+            } value[15:0];
+        } REG_1AH @ 0x034;
+
+        reg {
+            name = "REG_0x1F (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). fd6818b_default_register_init writes 0x5454 twice. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x5454 at fd6818b_default_register_init@0x0300ecec, fd6818b_default_register_init@0x0300ed70";
+            wire_addr = 0x1f;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x5454; sites on the register";
+            } value[15:0];
+        } REG_0x1F @ 0x03e;
+
+        reg {
+            name = "REG_0x20 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Only write is on the never-taken mode-1 branch of the RF mode table. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x8def at fd6818b_mode_register_table_apply@0x0300e78c [unreached]";
+            wire_addr = 0x20;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x8def; sites on the register";
+            } value[15:0];
+        } REG_0x20 @ 0x040;
+
+        reg {
+            name = "REG_0x21 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written together with REG_24H in every DTMF/SELCALL coefficient load (0x06d8 or 0x06fd). The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x06d8 at config_table_init_entries_0x21_0x24@0x0300f114; 0x06fd at config_table_init_entries_0300f2cc@0x0300f2d4, fd6818b_channel_table_register_program@0x030645dc, FUN_03067224@0x0306727e";
+            wire_addr = 0x21;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x6d8, 0x6fd; sites on the register";
+            } value[15:0];
+        } REG_0x21 @ 0x042;
+
+        reg {
+            name = "Crystal-range setting";
+            desc = "Appears only in the guide's crystal section (0x9E14 for 12-13 MHz, 0x5E14 for 18-20 MHz, 0x3E14 for 24-26 MHz). Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+            wire_addr = 0x22;
+            field {
+                sw = rw; hw = r;
+                desc = "Crystal-range constant.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+            } value[15:0];
+        } REG_22H @ 0x044;
+
+        reg {
+            name = "AF DAC level";
+            desc = "Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.59; FD6818 PG 1.0.0, TX block diagram (18), p.7";
+            ds_value = "0x8F8F";
+            wire_addr = 0x23;
+            field {
+                sw = rw; hw = r;
+                desc = "DAC maximum output level (guide recommends 1111).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59; FD6818 PG 1.0.0, TX block diagram (18), p.7";
+            } dac_vgain[3:0] = 0xf;
+        } REG_23H @ 0x046;
+
+        reg {
+            name = "MCBSP input select / DTMF companion (disputed)";
+            desc = "Guide: MCBSP/I2S input pin selects. DISAGREEMENT: stock writes 0x8c7e/0x8c2f/0x8c23 next to REG_0x21 in every DTMF/SELCALL coefficient load (and 0x0000 elsewhere), setting bit 15 which the guide marks reserved. On the FD6818B this register likely has a different, DTMF-related meaning; unproven.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.59";
+            ds_value = "0x603F";
+            fw_writes = "0x8c7e at config_table_init_entries_0x21_0x24@0x0300f11e; 0x0000 at config_table_entry_0x24@0x0300f12a, config_table_entry_0300f2e4@0x0300f2ea; 0x8c2f at config_table_init_entries_0300f2cc@0x0300f2de, fd6818b_channel_table_register_program@0x030645e6; 0x8c23 at FUN_03067224@0x03067288";
+            wire_addr = 0x24;
+            field {
+                sw = rw; hw = r;
+                desc = "Reserved per the guide; stock writes 0x8.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59";
+                fw_writes = "values written by stock: 0x0, 0x8; sites on the register";
+            } rsvd_15_12[15:12] = 0x6;
+            field {
+                sw = rw; hw = r;
+                desc = "GPIO used as I2S/MCBSP DCLKS input.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59";
+                fw_writes = "values written by stock: 0x0, 0x6; sites on the register";
+            } mcbsp_clks_in_sel[11:9] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "GPIO used as I2S/MCBSP DCLK input.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } mcbsp_clk_in_sel[8:6] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "GPIO used as I2S/MCBSP DFS input.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59";
+                fw_writes = "values written by stock: 0x0, 0x4, 0x5, 0x7; sites on the register";
+            } mcbsp_fs_in_sel[5:3] = 0x7;
+            field {
+                sw = rw; hw = r;
+                desc = "GPIO used as I2S/MCBSP DIN input.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59";
+                fw_writes = "values written by stock: 0x0, 0x3, 0x6, 0x7; sites on the register";
+            } mcbsp_dr_in_sel[2:0] = 0x7;
+        } REG_24H @ 0x048;
+
+        reg {
+            name = "GPIO output enable / value";
+            desc = "Stock writes 0xc1ba once (default init): gpio_oen_b=0xc1, gpio_out_val=0xba.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.59; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53-54";
+            ds_value = "0x0000";
+            fw_writes = "0xc1ba at fd6818b_default_register_init@0x0300ecf6";
+            wire_addr = 0x25;
+            field {
+                sw = rw; hw = r;
+                desc = "Per-GPIO output enable, active low.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53-54";
+                fw_writes = "values written by stock: 0xc1; sites on the register";
+            } gpio_oen_b[15:8] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "Per-GPIO level driven when that pin's out_sel is 0.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53-54";
+                fw_writes = "values written by stock: 0xba; sites on the register";
+            } gpio_out_val[7:0] = 0x0;
+        } REG_25H @ 0x04a;
+
+        reg {
+            name = "GPIO0-3 output select";
+            desc = "Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.59-60; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53";
+            ds_value = "0x0005";
+            wire_addr = 0x26;
+            field {
+                sw = rw; hw = r;
+                desc = "0 out_val, 1 INT, 2 SQ, 3 VOX, 4 subau_cmp, 5 CTCSS/CDCSS code, 6 SDO (4-wire), 12 I2S DOUT, 13 I2S DFS, 14 I2S DCLK, 15 XTAL/2.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59-60; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53";
+            } gpio3_out_sel[15:12] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "As gpio3_out_sel.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59-60; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53";
+            } gpio2_out_sel[11:8] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "As gpio3_out_sel.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59-60; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53";
+            } gpio1_out_sel[7:4] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "As gpio3_out_sel.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.59-60; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53";
+            } gpio0_out_sel[3:0] = 0x5;
+        } REG_26H @ 0x04c;
+
+        reg {
+            name = "GPIO4-7 output select";
+            desc = "Stock writes 0x7430/0xc430 only inside fd6818b_pa_power_level_select's branches 1/2, which its only caller (default init, argument 0) never takes; so stock leaves REG_27H at reset. The function name is a guess.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53";
+            ds_value = "0x3200";
+            fw_writes = "0x7430 at fd6818b_pa_power_level_select@0x0300e6b4 [unreached]; 0xc430 at fd6818b_pa_power_level_select@0x0300e6d4 [unreached]";
+            wire_addr = 0x27;
+            field {
+                sw = rw; hw = r;
+                desc = "As REG_26H.gpio3_out_sel.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53";
+                fw_writes = "values written by stock: 0x7, 0xc; sites on the register";
+            } gpio7_out_sel[15:12] = 0x3;
+            field {
+                sw = rw; hw = r;
+                desc = "As REG_26H.gpio3_out_sel.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53";
+                fw_writes = "values written by stock: 0x4; sites on the register";
+            } gpio6_out_sel[11:8] = 0x2;
+            field {
+                sw = rw; hw = r;
+                desc = "As REG_26H.gpio3_out_sel.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53";
+                fw_writes = "values written by stock: 0x3; sites on the register";
+            } gpio5_out_sel[7:4] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "As REG_26H.gpio3_out_sel.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, GPIO and interrupt setup, p.53";
+                fw_writes = "values written by stock: 0x0; sites on the register";
+            } gpio4_out_sel[3:0] = 0x0;
+        } REG_27H @ 0x04e;
+
+        reg {
+            name = "GPIO input / PA gain";
+            desc = "Two halves: [15:8] live GPIO input state (read-only), [5:0] TX power. DEVIATION: the guide's default 0x003F is not what the FD6818B reads: a real radio read 0x6b38 at boot (gpio_in_val=0x6b, padrv_gain=7, pa_gain_vreg=0) and 0x6b00 after a previous run had written padrv_gain=pa_gain_vreg=0, i.e. [5:0] is writable and survived a power cycle on that unit. Stock never writes REG_28H. Write [5:0] with read-modify-write.";
+            confidence = "CONFIRMED";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, TX power setup, p.23";
+            ds_value = "0x003F";
+            hw_reads = "Real radio: 0x6b38 (boot), 0x6b00 after writing [5:0]=0; TX keyed at padrv=0 vreg=0 and was heard. The QEMU model returns the datasheet default 0x003F.";
+            wire_addr = 0x28;
+            field {
+                sw = r; hw = w;
+                desc = "GPIO input levels (read-only). Live pin state, not a constant.";
+                confidence = "CONFIRMED";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, TX power setup, p.23";
+                hw_reads = "see the register's hw_reads";
+            } gpio_in_val[15:8];
+            field {
+                sw = rw; hw = r;
+                desc = "PA driver gain, 111 = max ... 000 = min (8x8 power table, p.23).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, TX power setup, p.23";
+                hw_reads = "Real radio: written 0, read back 0 (0x6b38 -> 0x6b00).";
+            } padrv_gain[5:3];
+            field {
+                sw = rw; hw = r;
+                desc = "PA regulator gain, 111 = max ... 000 = min.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, TX power setup, p.23";
+                hw_reads = "Real radio: reads 0 at boot; written 0, read back 0.";
+            } pa_gain_vreg[2:0];
+        } REG_28H @ 0x050;
+
+        reg {
+            name = "REG_0x29 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Only written (0xab2a/0xab20) on the never-taken branches of fd6818b_pa_power_level_select. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0xab2a at fd6818b_pa_power_level_select@0x0300e6be [unreached]; 0xab20 at fd6818b_pa_power_level_select@0x0300e6de [unreached]";
+            wire_addr = 0x29;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0xab20, 0xab2a; sites on the register";
+            } value[15:0];
+        } REG_0x29 @ 0x052;
+
+        reg {
+            name = "REG_0x2B (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written in FSK/tone contexts (0x0700, 0xc000, 0x0005); tone_gen_config_apply reads it, writes 0x0005, and restores the saved value afterwards. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x0700 at config_table_init_group1_variant_0300f16c@0x0300f192; 0xc000 at config_table_init_entries_and_param_2b@0x0300f1ac; 0x0005 at tone_gen_config_apply@0x03067d88; saved value (restore) at tone_gen_config_apply@0x03067e8c";
+            fw_reads = "read at tone_gen_config_apply@0x03067d7e";
+            wire_addr = 0x2b;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x5, 0x700, 0xc000 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } value[15:0];
+        } REG_0x2B @ 0x056;
+
+        reg {
+            name = "External LNA gain / RX 300 Hz response";
+            desc = "The guide uses REG_2CH two ways: ext_lna_gain[4:0] (RSSI compensation for an external LNA, SQ section) and a raw 0x8942 write to raise RX 300 Hz response (audio-response section). Internal disagreement; never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, SQ setup, p.47; FD6818 PG 1.0.0, Audio response, p.25";
+            wire_addr = 0x2c;
+            field {
+                sw = rw; hw = r;
+                desc = "External LNA gain, 1 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, SQ setup, p.47; FD6818 PG 1.0.0, Audio response, p.25";
+            } ext_lna_gain[4:0];
+        } REG_2CH @ 0x058;
+
+        reg {
+            name = "RX 300 Hz response";
+            desc = "Only in the guide's audio-response example (0x3751 with REG_2CH = 0x8942). Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            wire_addr = 0x2d;
+            field {
+                sw = rw; hw = r;
+                desc = "Filter constant.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            } value[15:0];
+        } REG_2DH @ 0x05a;
+
+        reg {
+            name = "Enable bits (FD6818B)";
+            desc = "THE FD6818B's RX/TX/PLL/PA enable register. Not in the FD6818 guide at 0x30; every value stock writes here decodes exactly onto the guide's REG_03H layout and recommended words: 0x0000 IDLE, 0xbff1 RXON (guide RXON), 0xc1fe TXON with mic (guide TXON), 0xc3fa TXON + sidetone without mic, 0x0302 TX DSP + AF with PA driver off. Stock usually writes 0x0000 first, then the state word, as the guide prescribes for REG_03H. Hardware: 0xbff1 gives working FM receive; 0xc1fe keyed a carrier into a dummy load; 0x0302 read back exactly with no RF. Stock never touches REG_03H. The register is CONFIRMED as the enable register; the per-bit layout is INFERRED from REG_03H (only the whole words above were tested).";
+            confidence = "CONFIRMED";
+            ds_ref = "Layout: FD6818 PG 1.0.0, Register summary, p.57 (REG_03H); FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+            fw_writes = "0x0000 at fd6818b_init_seq_filter_ctcss_chipmode@0x0002b5d2, fd6818b_filter_select_then_chipmode_normal@0x0002b60e, config_table_init_group1@0x0300e906, config_table_entry_0x30@0x0300e91e, config_table_init_entries_0300e924@0x0300e92a, fd6818b_partial_display_mode_reconfigure@0x03054c68, FUN_03068380@0x030683b2, tx_rf_frontend_init_and_burst@0x03068482; 0xc1fe at fd6818b_init_seq_filter_ctcss_chipmode@0x0002b5dc, tone_gen_config_apply@0x03067edc; 0xbff1 at fd6818b_filter_select_then_chipmode_normal@0x0002b618, fd6818b_default_register_init@0x0300ed7a, rf_transceiver_mode_init@0x03054c3a; 0xc3fa at config_table_init_group1@0x0300e910, tone_gen_config_apply@0x03067d06; 0x0302 at FUN_03068380@0x030683bc, tx_rf_frontend_init_and_burst@0x0306848c";
+            hw_reads = "Real radio: 0xbff1 -> RX works; 0xc1fe -> TX carrier heard; 0x0302 read back exactly, no RF.";
+            wire_addr = 0x30;
+            field {
+                sw = rw; hw = r;
+                desc = "0->1 starts PLL calibration (REG_03H layout).";
+                confidence = "INFERRED";
+                ds_ref = "Layout: FD6818 PG 1.0.0, Register summary, p.57 (REG_03H); FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } vco_cal_en[15:15];
+            field {
+                sw = rw; hw = r;
+                desc = "PABIAS output enable (REG_03H layout).";
+                confidence = "INFERRED";
+                ds_ref = "Layout: FD6818 PG 1.0.0, Register summary, p.57 (REG_03H); FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } pabias_en[14:14];
+            field {
+                sw = rw; hw = r;
+                desc = "RX blocks on when 1111 (REG_03H layout).";
+                confidence = "INFERRED";
+                ds_ref = "Layout: FD6818 PG 1.0.0, Register summary, p.57 (REG_03H); FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+                fw_writes = "values written by stock: 0x0, 0xf; sites on the register";
+            } rxlink_en[13:10];
+            field {
+                sw = rw; hw = r;
+                desc = "AFOUT DAC enable (REG_03H layout).";
+                confidence = "INFERRED";
+                ds_ref = "Layout: FD6818 PG 1.0.0, Register summary, p.57 (REG_03H); FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } afout_en[9:9];
+            field {
+                sw = rw; hw = r;
+                desc = "11111 = PLL/VCO on (REG_03H layout).";
+                confidence = "INFERRED";
+                ds_ref = "Layout: FD6818 PG 1.0.0, Register summary, p.57 (REG_03H); FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+                fw_writes = "values written by stock: 0x0, 0x10, 0x1f; sites on the register";
+            } pll_en[8:4];
+            field {
+                sw = rw; hw = r;
+                desc = "PA driver enable, i.e. the transmit gate (REG_03H layout; set in 0xc1fe, which radiated on a real radio, clear in 0x0302, which did not).";
+                confidence = "INFERRED";
+                ds_ref = "Layout: FD6818 PG 1.0.0, Register summary, p.57 (REG_03H); FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } padrv_en[3:3];
+            field {
+                sw = rw; hw = r;
+                desc = "MICIN ADC enable (REG_03H layout).";
+                confidence = "INFERRED";
+                ds_ref = "Layout: FD6818 PG 1.0.0, Register summary, p.57 (REG_03H); FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } micin_en[2:2];
+            field {
+                sw = rw; hw = r;
+                desc = "TX DSP enable (REG_03H layout).";
+                confidence = "INFERRED";
+                ds_ref = "Layout: FD6818 PG 1.0.0, Register summary, p.57 (REG_03H); FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } txon[1:1];
+            field {
+                sw = rw; hw = r;
+                desc = "RX DSP enable (REG_03H layout).";
+                confidence = "INFERRED";
+                ds_ref = "Layout: FD6818 PG 1.0.0, Register summary, p.57 (REG_03H); FD6818 PG 1.0.0, TX/RX state setup, p.18-19";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } rxon[0:0];
+        } REG_0x30 @ 0x060;
+
+        reg {
+            name = "TOT timer";
+            desc = "Guide (VOX/TOT section): tot_timer[7:0] in 327 ms units. Stock only touches 0x31 in three read-modify-write helpers (0x0300e824/0x0300e83c/0x0300e854) that have no caller.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+            fw_writes = "read-modify-write at FUN_0300e824@0x0300e836 [unreached], FUN_0300e83c@0x0300e84c [unreached], FUN_0300e854@0x0300e866 [unreached]";
+            fw_reads = "read at FUN_0300e824@0x0300e828 [unreached], FUN_0300e83c@0x0300e840 [unreached], FUN_0300e854@0x0300e858 [unreached]";
+            wire_addr = 0x31;
+            field {
+                sw = rw; hw = r;
+                desc = "TX time-out, x 327 ms.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } tot_timer[7:0];
+        } REG_31H @ 0x062;
+
+        reg {
+            name = "REG_0x32 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Stock writes only 0x0244 and 0x0245: 0x0244 after reading a REG_0x0D result, a 0x0244 -> 10 ms -> 0x0245 pulse to restart after 200 failed polls, 0x0245 on TX abort and after a frequency change, 0x0244 on idle reset and on channel change (FUN_0002b6a0). Bit 0 behaves as a start/run bit for the measurement read back through REG_0x0D/0x0E (STRUCTURAL).";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x0244 at FUN_0002b6a0@0x0002b6b6, fd6818b_status_register_poll_with_reinit@0x0300eefe, fd6818b_status_register_poll_with_reinit@0x0300ef22, radio_idle_state_reset@0x0302fbd0; 0x0245 at fd6818b_status_register_poll_with_reinit@0x0300ef32, tx_abort_and_radio_state_reset@0x0302fafc, (tail after rf_frequency_adjust_and_display_refresh)@0x0302fe78";
+            wire_addr = 0x32;
+            field {
+                sw = rw; hw = r;
+                desc = "Always 0x122 (written as 0x0244/0x0245).";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x122; sites on the register";
+            } value_15_1[15:1];
+            field {
+                sw = rw; hw = r;
+                desc = "Toggled 0 -> 1 to (re)start the REG_0x0D measurement.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } run[0:0];
+        } REG_0x32 @ 0x064;
+
+        reg {
+            name = "REG_0x33 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). FUN_0300ebdc(i, sel, flag), called twice by default init (i=6 sel=9 and i=5 sel=1, flag=0), clears bits (14-i) and (6-i) and sets bit (6-i) from flag, then writes a 4-bit selector for index i into REG_34H/35H. Per-index control bits; meaning unknown.";
+            confidence = "STRUCTURAL";
+            fw_writes = "read-modify-write of bits (14-i) and (6-i), i = 0..6 at FUN_0300ebdc@0x0300ebfe; read | (0x4000 >> i) at FUN_0300eddc@0x0300edf4 [unreached]";
+            fw_reads = "read at FUN_0300ebdc@0x0300ebe6, FUN_0300eddc@0x0300ede2 [unreached]";
+            wire_addr = 0x33;
+            field {
+                sw = rw; hw = r;
+                desc = "Bit (14-i) per index i = 0..6 (cleared by stock).";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } idx_hi[14:8];
+            field {
+                sw = rw; hw = r;
+                desc = "Bit (6-i) per index i = 0..6 (set from the flag argument).";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } idx_lo[6:0];
+        } REG_0x33 @ 0x066;
+
+        reg {
+            name = "Clock gating / index selectors 3-6";
+            desc = "Guide: written 0x606F / 0x206F in VCO mode to switch off clocks (no field layout). Stock: FUN_0300ebdc writes a 4-bit selector per index i: i=3 [15:12], 4 [11:8], 5 [7:4], 6 [3:0] (read-modify-write). Default init sets i=6 to 9 and i=5 to 1.";
+            confidence = "STRUCTURAL";
+            ds_ref = "FD6818 PG 1.0.0, VCO mode setup, p.39";
+            fw_writes = "RMW [15:12] at FUN_0300ec5a@0x0300ec6c; RMW [11:8] at FUN_0300ec72@0x0300ec84; RMW [7:4] at FUN_0300ec8a@0x0300ec9c; RMW [3:0] at FUN_0300eca2@0x0300ecb2";
+            fw_reads = "read at FUN_0300ec5a@0x0300ec5c, FUN_0300ec72@0x0300ec74, FUN_0300ec8a@0x0300ec8c, FUN_0300eca2@0x0300eca4";
+            wire_addr = 0x34;
+            field {
+                sw = rw; hw = r;
+                desc = "Selector, index 3.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, VCO mode setup, p.39";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } sel3[15:12];
+            field {
+                sw = rw; hw = r;
+                desc = "Selector, index 4.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, VCO mode setup, p.39";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } sel4[11:8];
+            field {
+                sw = rw; hw = r;
+                desc = "Selector, index 5 (stock: 1).";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, VCO mode setup, p.39";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } sel5[7:4];
+            field {
+                sw = rw; hw = r;
+                desc = "Selector, index 6 (stock: 9).";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, VCO mode setup, p.39";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } sel6[3:0];
+        } REG_34H @ 0x068;
+
+        reg {
+            name = "Clock gating / index selectors 0-2";
+            desc = "Guide: written 0xF608 / 0xF108 in VCO/DISC modes (no field layout). Stock: FUN_0300ebdc writes index 0 [11:8], 1 [7:4], 2 [3:0] (read-modify-write); default init touches none of them.";
+            confidence = "STRUCTURAL";
+            ds_ref = "FD6818 PG 1.0.0, VCO mode setup, p.39; FD6818 PG 1.0.0, DISC baseband mode, p.36";
+            fw_writes = "RMW [11:8] at FUN_0300ec14@0x0300ec26; RMW [7:4] at FUN_0300ec2c@0x0300ec3e; RMW [3:0] at FUN_0300ec44@0x0300ec54";
+            fw_reads = "read at FUN_0300ec14@0x0300ec16, FUN_0300ec2c@0x0300ec2e, FUN_0300ec44@0x0300ec46";
+            wire_addr = 0x35;
+            field {
+                sw = rw; hw = r;
+                desc = "Selector, index 0.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, VCO mode setup, p.39; FD6818 PG 1.0.0, DISC baseband mode, p.36";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } sel0[11:8];
+            field {
+                sw = rw; hw = r;
+                desc = "Selector, index 1.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, VCO mode setup, p.39; FD6818 PG 1.0.0, DISC baseband mode, p.36";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } sel1[7:4];
+            field {
+                sw = rw; hw = r;
+                desc = "Selector, index 2.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, VCO mode setup, p.39; FD6818 PG 1.0.0, DISC baseband mode, p.36";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } sel2[3:0];
+        } REG_35H @ 0x06a;
+
+        reg {
+            name = "REG_0x37 (undocumented, RX/TX mode)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written immediately before every REG_0x30 state change: 0x1f1f or 0x1f0f before RXON (chosen by a display-state flag in rf_transceiver_mode_init), 0x1d0f before TXON, 0x1d1f at default init, 0x1d11/0x1d00 in other paths. Hardware: the working RX entry on a real radio writes it before REG_0x30 as stock does, and it reads back 0x1d1f after an init sequence ported from stock. Low nibble pairs look like separate RX/TX selections; unproven.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x1d0f at fd6818b_init_seq_filter_ctcss_chipmode@0x0002b5c0, config_table_init_group1@0x0300e8f4, fd6818b_reg_write_arg37h_1d0fh@0x0300e944 [unreached], fd6818b_default_register_init@0x0300ecd2; 0x1f1f at fd6818b_filter_select_then_chipmode_normal@0x0002b5fa, rf_transceiver_mode_init@0x03054c24; 0x1f0f at fd6818b_filter_select_then_chipmode_normal@0x0002b606, rf_transceiver_mode_init@0x03054c30; 0x1d00 at config_table_init_entries_0300e924@0x0300e934, fd6818b_partial_display_mode_reconfigure@0x03054c8c; 0x1d1f at fd6818b_default_register_init@0x0300ed84; 0x1d11 at fd6818b_partial_display_mode_reconfigure@0x03054c80";
+            hw_reads = "Real radio: reads back 0x1d1f; RX works with 0x1f1f/0x1f0f written before 0x30=0xbff1.";
+            wire_addr = 0x37;
+            field {
+                sw = rw; hw = r;
+                desc = "Mode word (0x1d0f TX, 0x1f1f/0x1f0f RX).";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x1d00, 0x1d0f, 0x1d11, 0x1d1f, 0x1f0f, 0x1f1f; sites on the register";
+            } value[15:0];
+        } REG_0x37 @ 0x06e;
+
+        reg {
+            name = "Frequency, low word";
+            desc = "freq = ((REG_39H << 16) + REG_38H) * 10 Hz. Stock fd6818_set_frequency writes REG_38H (low) THEN REG_39H (high). Hardware: writing high-then-low left the PLL unlocked (REG_0CH 0x0080); low-then-high locks.";
+            confidence = "CONFIRMED";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20";
+            ds_value = "0x3A98";
+            fw_writes = "low 16 bits of freq/10Hz at fd6818_set_frequency@0x0002b574";
+            hw_reads = "Real radio: tunes 430.000 MHz with this order; PLL locked.";
+            wire_addr = 0x38;
+            field {
+                sw = rw; hw = r;
+                desc = "Frequency / 10 Hz, bits [15:0].";
+                confidence = "CONFIRMED";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                hw_reads = "see the register's hw_reads";
+            } freq_lo[15:0] = 0x3a98;
+        } REG_38H @ 0x070;
+
+        reg {
+            name = "Frequency, high word";
+            desc = "See REG_38H. Write after REG_38H. The guide adds: re-issue RXON/TXON after a frequency change.";
+            confidence = "CONFIRMED";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20";
+            ds_value = "0x0271";
+            fw_writes = "high 16 bits of freq/10Hz at fd6818_set_frequency@0x0002b57c";
+            hw_reads = "Real radio: as REG_38H.";
+            wire_addr = 0x39;
+            field {
+                sw = rw; hw = r;
+                desc = "Frequency / 10 Hz, bits [31:16].";
+                confidence = "CONFIRMED";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                hw_reads = "see the register's hw_reads";
+            } freq_hi[15:0] = 0x271;
+        } REG_39H @ 0x072;
+
+        reg {
+            name = "Bandwidth (withdrawn)";
+            desc = "The guide's bandwidth examples write 0x00E0 (25 kHz) / 0x0040 (12.5 kHz), but its own revision history (2018-07-24) says the REG_3AH setting was removed as an error. Stock never writes it.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Revision history, p.1; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20";
+            wire_addr = 0x3a;
+            field {
+                sw = rw; hw = r;
+                desc = "See desc.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Revision history, p.1; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20";
+            } value[15:0];
+        } REG_3AH @ 0x074;
+
+        reg {
+            name = "Crystal frequency, low";
+            desc = "xtal = ((REG_3CH >> 8) << 16 + REG_3BH) * 5 Hz. Stock's only writers are the cases of a crystal switch (FUN_0300ea48 dispatch, cases for 13, 19.2, 12.8, 25.6 and 38.4 MHz) that has no caller, so stock leaves the crystal at reset.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+            ds_value = "0x3D62";
+            fw_writes = "0xac40 at FUN_0300ea5c@0x0300ea76 [unreached]; 0x9800 at FUN_0300ea90@0x0300eaaa [unreached]; 0x1000 at FUN_0300eac4@0x0300eade [unreached]; 0x2000 at FUN_0300eaf8@0x0300eafe [unreached]; 0x3000 at FUN_0300eb0e@0x0300eb28 [unreached]";
+            wire_addr = 0x3b;
+            field {
+                sw = rw; hw = r;
+                desc = "Crystal frequency / 5 Hz, bits [15:0].";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+                fw_writes = "values written by stock: 0x1000, 0x2000, 0x3000, 0x9800, 0xac40; sites on the register";
+            } xtal_freq_lo[15:0] = 0x3d62;
+        } REG_3BH @ 0x076;
+
+        reg {
+            name = "Crystal frequency, high";
+            desc = "See REG_3BH. The guide calls [7:0] reserved, but its DISC/VCO example masks only [5:0] (REG_3CH & 0xFFC0) and the unreached stock crystal cases put 0x08/0x48/0x88/0xc8 there.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+            ds_value = "0x1000";
+            fw_writes = "0x2708 at FUN_0300ea5c@0x0300ea80 [unreached], FUN_0300eac4@0x0300eae8 [unreached]; 0x3a48 at FUN_0300ea90@0x0300eab4 [unreached]; 0x4e88 at FUN_0300eaf8@0x0300eb08 [unreached]; 0x75c8 at FUN_0300eb0e@0x0300eb32 [unreached]";
+            wire_addr = 0x3c;
+            field {
+                sw = rw; hw = r;
+                desc = "Crystal frequency / 5 Hz, bits [23:16].";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+                fw_writes = "values written by stock: 0x27, 0x3a, 0x4e, 0x75; sites on the register";
+            } xtal_freq_hi[15:8] = 0x10;
+            field {
+                sw = rw; hw = r;
+                desc = "Reserved per the summary; written by the examples, see desc.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60; FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+                fw_writes = "values written by stock: 0x8, 0x48, 0x88, 0xc8; sites on the register";
+            } low_byte[7:0] = 0x0;
+        } REG_3CH @ 0x078;
+
+        reg {
+            name = "Crystal-range constant";
+            desc = "Guide crystal section: 0x4EC5 / 0x3483 / 0x2762 for 12-13 / 18-20 / 24-26 MHz. The unreached stock crystal cases use different values (0x3555, 0x2e39, 0x261c).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+            fw_writes = "0x3555 at FUN_0300ea5c@0x0300ea8a [unreached], FUN_0300eac4@0x0300eaf2 [unreached]; 0x2e39 at FUN_0300ea90@0x0300eabe [unreached]; 0x261c at FUN_0300eb0e@0x0300eb3c [unreached]";
+            wire_addr = 0x3d;
+            field {
+                sw = rw; hw = r;
+                desc = "Crystal-range constant.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+                fw_writes = "values written by stock: 0x261c, 0x2e39, 0x3555; sites on the register";
+            } value[15:0];
+        } REG_3DH @ 0x07a;
+
+        reg {
+            name = "REG_0x3E (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). fd6818b_default_register_init writes 0xa037 twice. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0xa037 at fd6818b_default_register_init@0x0300ed0a, fd6818b_default_register_init@0x0300ed8e";
+            wire_addr = 0x3e;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0xa037; sites on the register";
+            } value[15:0];
+        } REG_0x3E @ 0x07c;
+
+        reg {
+            name = "Interrupt mask";
+            desc = "All 16 bits read/write. Hardware: 0xa5a5 and 0x5a5a round-tripped exactly and 0x0000 restored (the bus test used to prove the 3-wire link). Stock clears it, sets 0x8000 (FSK TX finished) for FSK transmit, and restores a saved mask.";
+            confidence = "CONFIRMED";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.60-61; FD6818 PG 1.0.0, GPIO and interrupt setup, p.50";
+            ds_value = "0x0000";
+            fw_writes = "0x0000 at FUN_0002b6a0@0x0002b6fa, config_table_init_entries_0300f050@0x0300f056, main_ui_background_task_loop@0x03013b16, favorite_channel_scan_confirm_and_switch@0x0306746a, tone_gen_config_apply@0x03067e6c; saved halfword (restore) at FUN_0002b6a0@0x0002b7c2, main_ui_background_task_loop@0x03013b20, (tail after favorite_channel_scan_confirm_and_switch)@0x03067474; 0x8000 at tone_gen_config_apply@0x03067e06";
+            hw_reads = "Real radio: write/readback 0xa5a5, 0x5a5a, 0x0000 exact.";
+            wire_addr = 0x3f;
+            field {
+                sw = rw; hw = r;
+                desc = "[15] FSK TX done, [14] FIFO almost empty, [13] FSK RX ok, [12] FIFO almost full, [11] header, [10] SyncP, [9] SyncN, [8] DTMF/SELCALL, [7] PLL lock lost, [6] CDCSS, [5] CTCSS, [2] TOT, [1] VOX, [0] SQ.";
+                confidence = "CONFIRMED";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.60-61; FD6818 PG 1.0.0, GPIO and interrupt setup, p.50";
+                fw_writes = "values written by stock: 0x0, 0x8000 (plus computed values); sites on the register";
+                hw_reads = "see the register's hw_reads";
+            } irq_mask[15:0] = 0x0;
+        } REG_3FH @ 0x07e;
+
+        reg {
+            name = "FM deviation";
+            desc = "GAIN = (256 + dev_lvl) >> dev_sh. Stock's main writer is fd6818b_reg_write_wrapper: byte(IRAM 0x00038470+0x38) | 0x3400 (dev_en=1, dev_sh=4); tone_gen_config_apply swaps in one of two fixed settings and restores afterwards. DEVIATION: a real radio read dev_en=1, dev_sh=4 after a soft reset, not the guide's 0x3808 default (whether that is the FD6818B reset value or a value retained from earlier operation is unresolved). The dev_lvl byte comes from per-radio runtime state and is not recorded here.";
+            confidence = "CONFIRMED";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.61; FD6818 PG 1.0.0, Modulation limit and MIC sensitivity, p.22";
+            ds_value = "0x3808";
+            fw_writes = "byte at IRAM 0x00038470+0x38 | 0x3400 at fd6818b_reg_write_wrapper@0x0300de6e, radio_init_sequence@0x0300e480, fd6818b_compander_calibration_write@0x03054e38, (tail after tx_key_from_vfo_mode_guard)@0x0305bf9c; 0x3500 at FUN_0300ea5c@0x0300ea62 [unreached], FUN_0300ea90@0x0300ea96 [unreached], FUN_0300eac4@0x0300eaca [unreached], FUN_0300eb0e@0x0300eb14 [unreached]; computed deviation | (read & 0xf000) at tone_gen_config_apply@0x03067d78; saved value (restore) at tone_gen_config_apply@0x03067e84";
+            fw_reads = "read at tone_gen_config_apply@0x03067d4a";
+            hw_reads = "Real radio: dev_en=1, dev_sh=4 (dev_lvl per-radio, omitted). QEMU model: datasheet 0x3808.";
+            wire_addr = 0x40;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = FM deviation (modulation) on.";
+                confidence = "CONFIRMED";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.61; FD6818 PG 1.0.0, Modulation limit and MIC sensitivity, p.22";
+                fw_writes = "values written by stock: 0x1 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+                hw_reads = "see the register's hw_reads";
+            } dev_en[12:12];
+            field {
+                sw = rw; hw = r;
+                desc = "Coarse deviation, 0000 = max ... 1111 = min (each step halves).";
+                confidence = "CONFIRMED";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.61; FD6818 PG 1.0.0, Modulation limit and MIC sensitivity, p.22";
+                fw_writes = "values written by stock: 0x5 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+                hw_reads = "see the register's hw_reads";
+            } dev_sh[11:8];
+            field {
+                sw = rw; hw = r;
+                desc = "Fine deviation.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.61; FD6818 PG 1.0.0, Modulation limit and MIC sensitivity, p.22";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } dev_lvl[7:0];
+        } REG_40H @ 0x080;
+
+        reg {
+            name = "Crystal-range constant 2";
+            desc = "Guide crystal section: 0x81C1 / 0x81C2 / 0x81C4 for 12-13 / 18-20 / 24-26 MHz. Written only by the unreached stock crystal cases (0x81c1, 0x81c2, 0x81c5).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+            fw_writes = "0x81c1 at FUN_0300ea5c@0x0300ea6c [unreached], FUN_0300eac4@0x0300ead4 [unreached]; 0x81c2 at FUN_0300ea90@0x0300eaa0 [unreached]; 0x81c5 at FUN_0300eb0e@0x0300eb1e [unreached]";
+            wire_addr = 0x41;
+            field {
+                sw = rw; hw = r;
+                desc = "Crystal-range constant.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Crystal/oscillator frequency setup, p.55";
+                fw_writes = "values written by stock: 0x81c1, 0x81c2, 0x81c5; sites on the register";
+            } value[15:0];
+        } REG_41H @ 0x082;
+
+        reg {
+            name = "RX filter / TX audio bandwidth";
+            desc = "Stock fd6818_tx_deviation_bandwidth_mode_set writes exactly the guide's recommended words: 0x3028 (25 kHz) and 0x4048 (12.5 kHz), plus 0x205c and 0x2028 for two further modes. Guide inconsistency: the summary lists [5:2] reserved, while the block-diagram and bandwidth sections define wb at [5].";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.61-62; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20-21";
+            ds_value = "0x6009";
+            fw_writes = "0x4048 at fd6818_tx_deviation_bandwidth_mode_set@0x0300e7b0; 0x3028 at fd6818_tx_deviation_bandwidth_mode_set@0x0300e7bc; 0x205c at fd6818_tx_deviation_bandwidth_mode_set@0x0300e7c8; 0x2028 at fd6818_tx_deviation_bandwidth_mode_set@0x0300e7d4; 0x0048 at config_table_init_group1_variant_0300f130@0x0300f136";
+            wire_addr = 0x43;
+            field {
+                sw = rw; hw = r;
+                desc = "RF filter bandwidth 1.7/2/2.5/3/3.75/4/4.25/4.5 kHz (x2 if wb).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.61-62; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20-21";
+                fw_writes = "values written by stock: 0x0, 0x2, 0x3, 0x4; sites on the register";
+            } firlpf_bw[14:12] = 0x6;
+            field {
+                sw = rw; hw = r;
+                desc = "RF filter bandwidth used for weak signals.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.61-62; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20-21";
+                fw_writes = "values written by stock: 0x0; sites on the register";
+            } firlpf_bw_for_weak[11:9] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "TX audio LPF: 100 4.5k, 101 4.25k, 110 4k, 111 3.75k, 000 3k, 001 2.5k, 010 2k, 011 1.7k.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.61-62; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20-21";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } audio_lpf2_tx_sel[8:6] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = 25/20 kHz wide band, 0 = 12.5 kHz (not in the summary table).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, RX block diagram (4), p.10; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.21";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } wb[5:5] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "Gain after FIR LPF: 0/6/12/18 dB.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.61-62; FD6818 PG 1.0.0, Band/frequency/bandwidth setup, p.20-21";
+                fw_writes = "values written by stock: 0x0; sites on the register";
+            } firlpf_gain[1:0] = 0x1;
+        } REG_43H @ 0x086;
+
+        reg {
+            name = "FM demod gain / DISC mode";
+            desc = "The guide's DISC example writes 0x53EC | 1 ('[0] DISC mode enable'), a bit the summary calls reserved. Stock writes REG_44H only in an unreached switch case.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.62; FD6818 PG 1.0.0, DISC baseband mode, p.36";
+            ds_value = "0x43EC";
+            fw_writes = "per-case constant at FUN_0300e9f8@0x0300ea1a [unreached]";
+            wire_addr = 0x44;
+            field {
+                sw = rw; hw = r;
+                desc = "Gain after FM demod: 0/6/12/18 dB.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.62; FD6818 PG 1.0.0, DISC baseband mode, p.36";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } fmdem_gain[12:11] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "DISC mode enable (example only; summary: reserved).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, DISC baseband mode, p.36";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } disc_mode_en[0:0] = 0x0;
+        } REG_44H @ 0x088;
+
+        reg {
+            name = "REG_0x45 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written only by an unreached switch case (paired with REG_44H). The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "per-case constant at FUN_0300e9f8@0x0300ea22 [unreached]";
+            wire_addr = 0x45;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } value[15:0];
+        } REG_0x45 @ 0x08a;
+
+        reg {
+            name = "VOX thresholds";
+            desc = "Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.62; FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+            ds_value = "0x8050";
+            wire_addr = 0x46;
+            field {
+                sw = rw; hw = r;
+                desc = "VOX only when RSSI is below this, 2 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.62; FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+            } vox_rssi_th[15:10] = 0x20;
+            field {
+                sw = rw; hw = r;
+                desc = "Voice amplitude threshold for VOX=1.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.62; FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+            } vox_amp_th_in[9:0] = 0x50;
+        } REG_46H @ 0x08c;
+
+        reg {
+            name = "AF output path / TX digital gain";
+            desc = "afout_mode selects what drives AFOUT. Stock values: 0x0100 at default init, 0x6740 for DMR/BYPASS TX (the guide's BYPASS TXON word), 0x6042 / (byte<<8)|0x6042, 0x6040, 0x6943, 0x0140, and read-modify-write (x & ~0x0f00) | 0x0100 or x & ~0x0f00. Stock never writes 0x6140 (the guide's BYPASS RXON word). The summary lists [15:14] and [7:4] reserved, yet both the guide's examples and stock set bit 14 and bits [7:4].";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.62-63; FD6818 PG 1.0.0, RX mute and volume, p.24; FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+            ds_value = "0x6140";
+            fw_writes = "0x6740 at fd6818b_reg47_tx_bypass_or_rx_afout@0x0002b532, config_table_init_group1_variant_0300f130@0x0300f140; (read & ~0x0f00) | 0x0100 at fd6818b_reg47_tx_bypass_or_rx_afout@0x0002b548; read & ~0x0f00 at fd6818b_reg47_afout_clear_mode@0x0002b560; (arg << 8) | 0x6042 at fd6818b_reg47_write_byte_or_6042@0x0002b590; 0x0140 at FUN_0002b6a0@0x0002b6ec, config_table_init_group1_variant_0300f16c@0x0300f174; 0x6042 at FUN_0002b6a0@0x0002b7d8, config_table_init_entries_0300e884@0x0300e88c; 0x6943 at FUN_0300e86c@0x0300e874 [unreached]; 0x0100 at fd6818b_default_register_init@0x0300ed98; 0x6040 at tone_gen_config_apply@0x03067ea8";
+            fw_reads = "read at fd6818b_reg47_tx_bypass_or_rx_afout@0x0002b53a, fd6818b_reg47_afout_clear_mode@0x0002b554";
+            wire_addr = 0x47;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = invert AFOUT.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.62-63; FD6818 PG 1.0.0, RX mute and volume, p.24; FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+                fw_writes = "values written by stock: 0x0, 0x1 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } afout_invert[13:13] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "0x10 MUTE, 0x11 RX AFOUT, 0x18 BEEP/TX sidetone, 0x15 RX alarm tone; BYPASS examples use 0x07 (MIC ADC straight to TX) and 0x01 (FM demod straight to AFOUT).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.62-63; FD6818 PG 1.0.0, RX mute and volume, p.24; FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+                fw_writes = "values written by stock: 0x0, 0x1, 0x7, 0x9 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } afout_mode[12:8] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "Digital gain after MIC ADC, 1 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.62-63; FD6818 PG 1.0.0, RX mute and volume, p.24; FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+                fw_writes = "values written by stock: 0x0, 0x2, 0x3 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } dig_gain_tx[3:0] = 0x0;
+        } REG_47H @ 0x08e;
+
+        reg {
+            name = "CIC mode (BYPASS)";
+            desc = "Only in the guide's BYPASS example (0x6C5C, 'cic mode'). Stock writes 0x33ef at default init then 0xbbbf, and byte | 0x31e0 from fd6818b_reg48_cic_mode_write.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+            fw_writes = "arg byte | 0x31e0 at fd6818b_reg48_cic_mode_write@0x0002b62e; 0x33ef at fd6818b_default_register_init@0x0300ece2; 0xbbbf at fd6818b_default_register_init@0x0300eda2, config_table_init_group1_variant_0300f16c@0x0300f17e";
+            wire_addr = 0x48;
+            field {
+                sw = rw; hw = r;
+                desc = "CIC/filter mode word.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+                fw_writes = "values written by stock: 0x33ef, 0xbbbf (plus computed values); sites on the register";
+            } value[15:0];
+        } REG_48H @ 0x090;
+
+        reg {
+            name = "REG_0x49 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Always 0x2a38 (default init and RF mode table). The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x2a38 at fd6818b_mode_register_table_apply@0x0300e726, fd6818b_mode_register_table_apply@0x0300e76e [unreached], fd6818b_default_register_init@0x0300edac";
+            wire_addr = 0x49;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x2a38; sites on the register";
+            } value[15:0];
+        } REG_0x49 @ 0x092;
+
+        reg {
+            name = "REG_0x4A (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). 0x5450, written by one TX bandwidth-mode variant (config_table_init_group1_variant_0300f130). The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x5450 at config_table_init_group1_variant_0300f130@0x0300f154";
+            wire_addr = 0x4a;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x5450; sites on the register";
+            } value[15:0];
+        } REG_0x4A @ 0x094;
+
+        reg {
+            name = "CIC mode 2 (BYPASS)";
+            desc = "Only in the guide's BYPASS example (0xE442, 'cic mode'). Stock writes 0x7102/0x7120 only on the never-taken branches of fd6818b_pa_power_level_select.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+            fw_writes = "0x7102 at fd6818b_pa_power_level_select@0x0300e6aa [unreached]; 0x7120 at fd6818b_pa_power_level_select@0x0300e6ca [unreached]";
+            wire_addr = 0x4b;
+            field {
+                sw = rw; hw = r;
+                desc = "CIC/filter mode word.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+                fw_writes = "values written by stock: 0x7102, 0x7120; sites on the register";
+            } value[15:0];
+        } REG_4BH @ 0x096;
+
+        reg {
+            name = "REG_0x4E (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). fd6818b_default_register_init writes 0x4708. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x4708 at fd6818b_default_register_init@0x0300edb6";
+            wire_addr = 0x4e;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x4708; sites on the register";
+            } value[15:0];
+        } REG_0x4E @ 0x09c;
+
+        reg {
+            name = "Noise squelch thresholds";
+            desc = "Stock writes 0x302f at default init (th_out 0x30, th_in 0x2f).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, SQ setup, p.47";
+            ds_value = "0x7E34";
+            fw_writes = "0x302f at fd6818b_default_register_init@0x0300edc0";
+            wire_addr = 0x4f;
+            field {
+                sw = rw; hw = r;
+                desc = "Noise threshold for SQ=0.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, SQ setup, p.47";
+                fw_writes = "values written by stock: 0x30; sites on the register";
+            } noise_sq_th_out[14:8] = 0x7e;
+            field {
+                sw = rw; hw = r;
+                desc = "Noise threshold for SQ=1.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, SQ setup, p.47";
+                fw_writes = "values written by stock: 0x2f; sites on the register";
+            } noise_sq_th_in[6:0] = 0x34;
+        } REG_4FH @ 0x09e;
+
+        reg {
+            name = "TX audio mute / limit";
+            desc = "Stock toggles audio_tx_mute around TX: 0xbb18/0x3b18 and 0xbb20/0x3b20 (limit 0x318/0x320; bits [14:11] = 0111, reserved per the guide). Hardware readback 0x3b20 during a TX dry run.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, DTMF mode setup, p.29-30";
+            ds_value = "0x033C";
+            fw_writes = "0xbb18 at fd6818b_reg50_write_bb18@0x0002b5a0; 0x3b18 at fd6818b_reg50_write_3b18@0x0002b5b0; 0x3b20 at tone_gen_config_apply@0x03067cfc, tone_gen_config_apply@0x03067ee6; 0xbb20 at tone_gen_config_apply@0x03067e9e";
+            hw_reads = "Real radio: reads back 0x3b20 as written.";
+            wire_addr = 0x50;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = mute TX audio (guide: mute before keying, unmute after).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, DTMF mode setup, p.29-30";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } audio_tx_mute[15:15] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = bypass the TX limiter.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, DTMF mode setup, p.29-30";
+                fw_writes = "values written by stock: 0x0; sites on the register";
+            } audio_tx_limit_bypass[10:10] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "TX limiter value.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, DTMF mode setup, p.29-30";
+                fw_writes = "values written by stock: 0x318, 0x320; sites on the register";
+            } audio_tx_limit[9:0] = 0x33c;
+        } REG_50H @ 0x0a0;
+
+        reg {
+            name = "Sub-audio control";
+            desc = "Stock rf_mode_config_entry_0x51_apply: 0 = off; gain | 0x8000 (CDCSS positive); gain | 0xa000 (CDCSS negative, dcs_invert); gain | 0x9000 (CTCSS); or 0x1400; matching the guide's sub-audio examples (0x90C5 CTCSS, 0x80B0 CDCSS, 0x0000 off). The gain byte is a settings value.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+            ds_value = "0x1050";
+            fw_writes = "arg | 0x8000 at rf_mode_config_entry_0x51_apply@0x0300dd36, fd6818b_reg_write_51h_or8000h@0x03054e10; gain byte | 0xa000 at rf_mode_config_entry_0x51_apply@0x0300dd48; 0x1400 at rf_mode_config_entry_0x51_apply@0x0300dd72; gain byte | 0x9000 at rf_mode_config_entry_0x51_apply@0x0300dd84; 0x0000 at rf_mode_config_entry_0x51_apply@0x0300dd8e, config_table_entry_0x51_clear@0x0300e81a, tone_gen_config_apply@0x03067d44, (tail after tx_key_from_vfo_mode_guard)@0x0305bfa4; 0x0300 at rf_frequency_adjust_and_display_refresh@0x0302fdb4; arg | 0x9000 at fd6818b_reg_write_51h_or9000h@0x03054e28; saved value (restore) at tone_gen_config_apply@0x03067e94";
+            fw_reads = "read at tone_gen_config_apply@0x03067d3a";
+            wire_addr = 0x51;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = CTCSS/CDCSS on.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } subau_en[15:15] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = transmit negative CDCSS code.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } dcs_invert[13:13] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = CTCSS, 0 = CDCSS.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+                fw_writes = "values written by stock: 0x0, 0x1 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } ctc_dcs_sel[12:12] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = 24-bit, 0 = 23-bit CDCSS.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } dcs_24b_mode[11:11] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "[6:5] coarse, [4:0] fine: gain = (1 + fine/32) << coarse.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63; FD6818 PG 1.0.0, Sub-audio setup, p.42-43";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } subau_gain[6:0] = 0x50;
+        } REG_51H @ 0x0a2;
+
+        reg {
+            name = "Sub-audio tail / CTCSS detect";
+            desc = "Stock: 0x028f (= reset) and 0x828f/0xa28f/0xc28f/0xe28f, i.e. subau_tail_gen with each ctc_tail_offs phase.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.63-64; FD6818 PG 1.0.0, Sub-audio setup, p.44";
+            ds_value = "0x028F";
+            fw_writes = "0x028f at fd6818b_init_seq_filter_ctcss_chipmode@0x0002b5ca, config_table_init_group1@0x0300e8fe, fd6818b_default_register_init@0x0300edca; 0x828f at config_table_entry_0300e8bc@0x0300e8c2; 0xa28f at config_table_entry_0300e8c8@0x0300e8ce; 0xc28f at config_table_entry_0300e8d4@0x0300e8da; 0xe28f at config_table_entry_0300e8e0@0x0300e8e6";
+            wire_addr = 0x52;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = generate sub-audio tail.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63-64; FD6818 PG 1.0.0, Sub-audio setup, p.44";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } subau_tail_gen[15:15] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "00 CTCSS1 tail, 01/10/11 CTCSS0 with 120/180/240 deg shift.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63-64; FD6818 PG 1.0.0, Sub-audio setup, p.44";
+                fw_writes = "values written by stock: 0x0, 0x1, 0x2, 0x3; sites on the register";
+            } ctc_tail_offs[14:13] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = ~0.1 % units, 0 = 0.1 Hz units.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63-64; FD6818 PG 1.0.0, Sub-audio setup, p.44";
+                fw_writes = "values written by stock: 0x0; sites on the register";
+            } ctc_th_mode[12:12] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "CTCSS found threshold.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63-64; FD6818 PG 1.0.0, Sub-audio setup, p.44";
+                fw_writes = "values written by stock: 0xa; sites on the register";
+            } ctc_th_in[11:6] = 0xa;
+            field {
+                sw = rw; hw = r;
+                desc = "CTCSS lost threshold.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.63-64; FD6818 PG 1.0.0, Sub-audio setup, p.44";
+                fw_writes = "values written by stock: 0xf; sites on the register";
+            } ctc_th_out[5:0] = 0xf;
+        } REG_52H @ 0x0a4;
+
+        reg {
+            name = "Audio digital gains";
+            desc = "Written (0xe678) only on a never-taken branch of fd6818b_pa_power_level_select, so stock leaves it at reset. Guide inconsistency: the summary says shift 111 = max, the RX block diagram and volume section say 000 = max.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.64; FD6818 PG 1.0.0, RX mute and volume, p.24";
+            ds_value = "0x97DD";
+            fw_writes = "0xe678 at fd6818b_pa_power_level_select@0x0300e6a0 [unreached]";
+            wire_addr = 0x53;
+            field {
+                sw = rw; hw = r;
+                desc = "RX coarse gain, 6 dB/step (polarity disputed, see desc).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64; FD6818 PG 1.0.0, RX mute and volume, p.24";
+                fw_writes = "values written by stock: 0x7; sites on the register";
+            } audio_rx_gain_sh[15:13] = 0x4;
+            field {
+                sw = rw; hw = r;
+                desc = "TX coarse gain, 6 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64; FD6818 PG 1.0.0, RX mute and volume, p.24";
+                fw_writes = "values written by stock: 0x1; sites on the register";
+            } audio_tx_gain_sh[12:10] = 0x5;
+            field {
+                sw = rw; hw = r;
+                desc = "RX fine gain, 1 dB/step, 0 = mute.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64; FD6818 PG 1.0.0, RX mute and volume, p.24";
+                fw_writes = "values written by stock: 0x13; sites on the register";
+            } audio_rx_gain[9:5] = 0x1e;
+            field {
+                sw = rw; hw = r;
+                desc = "TX fine gain, 1 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64; FD6818 PG 1.0.0, RX mute and volume, p.24";
+                fw_writes = "values written by stock: 0x18; sites on the register";
+            } audio_tx_gain[4:0] = 0x1d;
+        } REG_53H @ 0x0a6;
+
+        reg {
+            name = "Scrambler / FSK rate";
+            desc = "Control word = f(kHz) * 2^26 / 6500 (2.6-3.5 kHz for the scrambler). Shared by FSK. Stock writes it only in an unreached switch case.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.64; FD6818 PG 1.0.0, FSK mode setup, p.34";
+            ds_value = "0x8517";
+            fw_writes = "per-case constant at FUN_0300e9f8@0x0300ea3a [unreached]";
+            wire_addr = 0x54;
+            field {
+                sw = rw; hw = r;
+                desc = "Scrambler/FSK rate word.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64; FD6818 PG 1.0.0, FSK mode setup, p.34";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } scramb_freq[15:0] = 0x8517;
+        } REG_54H @ 0x0a8;
+
+        reg {
+            name = "REG_0x55 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written only by an unreached switch case (paired with REG_54H). The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "per-case constant at FUN_0300e9f8@0x0300ea42 [unreached]";
+            wire_addr = 0x55;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } value[15:0];
+        } REG_0x55 @ 0x0aa;
+
+        reg {
+            name = "FSK CRC polynomial";
+            desc = "Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.64; FD6818 PG 1.0.0, FSK mode setup, p.34";
+            ds_value = "0x1021";
+            wire_addr = 0x56;
+            field {
+                sw = rw; hw = r;
+                desc = "CRC polynomial (CCITT-16 default).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64; FD6818 PG 1.0.0, FSK mode setup, p.34";
+            } fsk_crc_polyn[15:0] = 0x1021;
+        } REG_56H @ 0x0ac;
+
+        reg {
+            name = "REG_0x58 (undocumented, FSK)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written next to the FSK registers 0x59-0x5e (0x00c1, 0x3f03, 0x3c03, 0x0000). The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x00c1 at FUN_0300efd0@0x0300efea [unreached]; 0x0000 at config_table_init_entries_0300f03c@0x0300f04a, FUN_03067564@0x030675ee, tone_gen_config_apply@0x03067e7c; 0x3f03 at FUN_03067564@0x03067584; 0x3c03 at tone_gen_config_apply@0x03067d92";
+            wire_addr = 0x58;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x0, 0xc1, 0x3c03, 0x3f03; sites on the register";
+            } value[15:0];
+        } REG_0x58 @ 0x0b0;
+
+        reg {
+            name = "FSK control";
+            desc = "Stock uses it for packet transmit/receive (e.g. 0xc0f8 clear both FIFOs, 0x08f8/0x00f8, 0x1008/0xc008, x|0xc000, x|0x1000). Guide inconsistency: in the summary bit 12 'fsk_rx_en' is described as 'Enable FSK TX' and bit 11 'fsk_tx_en' as 'Enable FSK RX'; the FSK section repeats this. Bit names are kept, the descriptions are not trusted.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.64-65; FD6818 PG 1.0.0, FSK mode setup, p.34-35";
+            ds_value = "0x8078";
+            fw_writes = "0x0028 at config_table_init_entries_0300f050@0x0300f05e; 0xc008 at FUN_03067564@0x030675ca; 0x1008 at FUN_03067564@0x030675d4; x | 0xc000 at uart_rx_frame_assemble_polarity_correct@0x03067a62, uart_rx_frame_assemble_polarity_correct@0x03067ad0; x | 0x1000 at uart_rx_frame_assemble_polarity_correct@0x03067a6c, uart_rx_frame_assemble_polarity_correct@0x03067ada; 0xc0f8 at tone_gen_config_apply@0x03067dd8; 0x00f8 at tone_gen_config_apply@0x03067de0, tone_gen_config_apply@0x03067e64; 0x08f8 at tone_gen_config_apply@0x03067e10";
+            fw_reads = "read at uart_rx_frame_assemble_polarity_correct@0x03067988";
+            wire_addr = 0x59;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = clear TX FIFO.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64-65; FD6818 PG 1.0.0, FSK mode setup, p.34-35";
+                fw_writes = "values written by stock: 0x0, 0x1 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_tx_fifo_clear[15:15] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = clear RX FIFO.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64-65; FD6818 PG 1.0.0, FSK mode setup, p.34-35";
+                fw_writes = "values written by stock: 0x0, 0x1 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_rx_fifo_clear[14:14] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = FSK scrambling.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64-65; FD6818 PG 1.0.0, FSK mode setup, p.34-35";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_scramble_en[13:13] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "FSK enable (name says RX; guide text says TX).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64-65; FD6818 PG 1.0.0, FSK mode setup, p.34-35";
+                fw_writes = "values written by stock: 0x0, 0x1 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_rx_en[12:12] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "FSK enable (name says TX; guide text says RX).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64-65; FD6818 PG 1.0.0, FSK mode setup, p.34-35";
+                fw_writes = "values written by stock: 0x0, 0x1 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_tx_en[11:11] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "Invert FSK data (direction disputed between p.34 and p.64).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64-65; FD6818 PG 1.0.0, FSK mode setup, p.34-35";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_rx_data_inv[10:10] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "Invert FSK data (direction disputed between p.34 and p.64).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64-65; FD6818 PG 1.0.0, FSK mode setup, p.34-35";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_tx_data_inv[9:9] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "Preamble length = n+1 bytes.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64-65; FD6818 PG 1.0.0, FSK mode setup, p.34-35";
+                fw_writes = "values written by stock: 0x0, 0x2, 0xf (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_prmb_size[7:4] = 0x7;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = 4-byte sync word, 0 = 2-byte.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.64-65; FD6818 PG 1.0.0, FSK mode setup, p.34-35";
+                fw_writes = "values written by stock: 0x1 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_sync_size[3:3] = 0x1;
+        } REG_59H @ 0x0b2;
+
+        reg {
+            name = "FSK sync bytes 0-1";
+            desc = "Stock writes 0x85cf (= reset) and computed values.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+            ds_value = "0x85CF";
+            fw_writes = "0x85cf at FUN_0300efd0@0x0300eff4 [unreached]; sync bytes at FUN_03067564@0x03067594; 0x0000 at tone_gen_config_apply@0x03067dbc";
+            wire_addr = 0x5a;
+            field {
+                sw = rw; hw = r;
+                desc = "Sync byte 0.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+                fw_writes = "values written by stock: 0x0, 0x85 (plus computed values); sites on the register";
+            } fsk_sync_byte0[15:8] = 0x85;
+            field {
+                sw = rw; hw = r;
+                desc = "Sync byte 1.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+                fw_writes = "values written by stock: 0x0, 0xcf (plus computed values); sites on the register";
+            } fsk_sync_byte1[7:0] = 0xcf;
+        } REG_5AH @ 0x0b4;
+
+        reg {
+            name = "FSK sync bytes 2-3";
+            desc = "Stock writes 0xab45 (= reset) and computed values.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+            ds_value = "0xAB45";
+            fw_writes = "0xab45 at FUN_0300efd0@0x0300effe [unreached]; sync bytes at FUN_03067564@0x030675a2; 0x0000 at tone_gen_config_apply@0x03067dc4";
+            wire_addr = 0x5b;
+            field {
+                sw = rw; hw = r;
+                desc = "Sync byte 2.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+                fw_writes = "values written by stock: 0x0, 0xab (plus computed values); sites on the register";
+            } fsk_sync_byte2[15:8] = 0xab;
+            field {
+                sw = rw; hw = r;
+                desc = "Sync byte 3.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+                fw_writes = "values written by stock: 0x0, 0x45 (plus computed values); sites on the register";
+            } fsk_sync_byte3[7:0] = 0x45;
+        } REG_5BH @ 0x0b6;
+
+        reg {
+            name = "FSK type byte";
+            desc = "Stock writes 0x5665 and 0x5625: type 0x65 / 0x25, neither of the guide's listed values (0x01, 0x21, 0x61); bit 2 differs from 0x61/0x21. Unexplained.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+            ds_value = "0x56F9";
+            fw_writes = "0x5665 at FUN_0300efd0@0x0300f008 [unreached]; 0x5625 at FUN_03067564@0x030675ac, tone_gen_config_apply@0x03067dce";
+            wire_addr = 0x5c;
+            field {
+                sw = rw; hw = r;
+                desc = "0x01 format 2, 0x21 format 1 no CRC, 0x61 format 1 with CRC.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+                fw_writes = "values written by stock: 0x25, 0x65; sites on the register";
+            } fsk_tx_type_byte[7:0] = 0xf9;
+        } REG_5CH @ 0x0b8;
+
+        reg {
+            name = "FSK length";
+            desc = "Stock writes 0x0d00 and computed lengths.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+            ds_value = "0x3FCC";
+            fw_writes = "length field at FUN_0300efd0@0x0300f01a [unreached], tone_gen_config_apply@0x03067db4; 0x0d00 at FUN_03067564@0x030675c0";
+            wire_addr = 0x5d;
+            field {
+                sw = rw; hw = r;
+                desc = "Format-1 length = n+1 (summary: bytes; FSK section: words).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+                fw_writes = "values written by stock: 0xd (plus computed values); sites on the register";
+            } fsk_length[15:8] = 0x3f;
+        } REG_5DH @ 0x0ba;
+
+        reg {
+            name = "FSK FIFO thresholds";
+            desc = "Stock writes 0x0201 and reads it.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+            ds_value = "0x0004";
+            fw_writes = "0x0201 at FUN_03067564@0x030675b6";
+            fw_reads = "read at uart_rx_frame_assemble_polarity_correct@0x030679fe";
+            wire_addr = 0x5e;
+            field {
+                sw = rw; hw = r;
+                desc = "TX FIFO almost-empty threshold, words.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+                fw_writes = "values written by stock: 0x8; sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_tx_fifo_ae_th[11:6] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "RX FIFO almost-full threshold, words.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.35";
+                fw_writes = "values written by stock: 0x1; sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_rx_fifo_af_th[5:0] = 0x4;
+        } REG_5EH @ 0x0bc;
+
+        reg {
+            name = "FSK FIFO data";
+            desc = "Write = TX FIFO, read = RX FIFO (64 words each). Stock loops over it.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.33";
+            fw_writes = "FIFO data words (loop) at tone_gen_config_apply@0x03067df4";
+            fw_reads = "read at uart_rx_frame_assemble_polarity_correct@0x03067a18";
+            wire_addr = 0x5f;
+            field {
+                sw = rw; hw = w;
+                desc = "FIFO data word.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65; FD6818 PG 1.0.0, FSK mode setup, p.33";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } fsk_data[15:0];
+        } REG_5FH @ 0x0be;
+
+        reg {
+            name = "Sub-audio detect";
+            desc = "Never read by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.65-66; FD6818 PG 1.0.0, Sub-audio setup, p.44";
+            wire_addr = 0x60;
+            field {
+                sw = r; hw = w;
+                desc = "[0] positive, [1] negative CDCSS received.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65-66; FD6818 PG 1.0.0, Sub-audio setup, p.44";
+            } dcs_detect[11:10];
+            field {
+                sw = r; hw = w;
+                desc = "[1] CTCSS1, [0] CTCSS0 received.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.65-66; FD6818 PG 1.0.0, Sub-audio setup, p.44";
+            } ctc_detect[1:0];
+        } REG_60H @ 0x0c0;
+
+        reg {
+            name = "SNR";
+            desc = "Never read by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, SQ setup, p.47";
+            wire_addr = 0x61;
+            field {
+                sw = r; hw = w;
+                desc = "SNR, dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, SQ setup, p.47";
+            } snr_out[15:8];
+        } REG_61H @ 0x0c2;
+
+        reg {
+            name = "RSSI (two taps)";
+            desc = "Two RSSI taps: agc_rssi (after ADC/DCC, narrowband) and lna_peak_rssi (after LNA, wideband). Stock never reads REG_62H (it reads REG_67H rssi_sq). Hardware: both fields return live, wandering values at the noise floor and agc_rssi tracks a real signal; the absolute dB offset/slope is not measured.";
+            confidence = "CONFIRMED";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, RX block diagram (1)(2), p.10";
+            hw_reads = "Real radio: both taps live; agc_rssi moves with signal. QEMU model: jittered agc_rssi around 0x30 by default.";
+            wire_addr = 0x62;
+            field {
+                sw = r; hw = w;
+                desc = "RSSI after DCC, 1 dB/step.";
+                confidence = "CONFIRMED";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, RX block diagram (1)(2), p.10";
+                hw_reads = "see the register's hw_reads";
+            } agc_rssi[15:8];
+            field {
+                sw = r; hw = w;
+                desc = "RSSI after LNA, 1 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, RX block diagram (1)(2), p.10";
+            } lna_peak_rssi[7:0];
+        } REG_62H @ 0x0c4;
+
+        reg {
+            name = "REG_0x63 (undocumented, read)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Read (low byte) only by FUN_0300ebd0, which has no caller. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_reads = "read at FUN_0300ebd0@0x0300ebd4 [unreached]";
+            wire_addr = 0x63;
+            field {
+                sw = r; hw = w;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } value[15:0];
+        } REG_0x63 @ 0x0c6;
+
+        reg {
+            name = "VOX amplitude";
+            desc = "Stock reads it masking 15 bits (& 0x7fff) where the guide defines [9:0], in FUN_0300eb94, which has no caller.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+            fw_reads = "read at FUN_0300eb94@0x0300eb98 [unreached]";
+            wire_addr = 0x64;
+            field {
+                sw = r; hw = w;
+                desc = "Voice amplitude.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+                fw_reads = "read by stock; sites on the register";
+            } vox_amp[9:0];
+        } REG_64H @ 0x0c8;
+
+        reg {
+            name = "Relative RSSI / noise";
+            desc = "Stock reads noise_sq & 0x7f in FUN_0300ebc0 (no caller).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, SQ setup, p.47";
+            fw_reads = "read at FUN_0300ebc0@0x0300ebc4 [unreached]";
+            wire_addr = 0x65;
+            field {
+                sw = r; hw = w;
+                desc = "Relative RSSI, dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, SQ setup, p.47";
+                fw_reads = "read by stock; sites on the register";
+            } rssi_rel[15:8];
+            field {
+                sw = r; hw = w;
+                desc = "Noise indicator, dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, SQ setup, p.47";
+                fw_reads = "read by stock; sites on the register";
+            } noise_sq[7:0];
+        } REG_65H @ 0x0ca;
+
+        reg {
+            name = "Squelch RSSI";
+            desc = "RSSI(dB) = rssi_sq/2 - 160. Stock reads [8:0] (reg_0x67_lower9_read) from the AGC loop and two other callers.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, SQ setup, p.47";
+            fw_reads = "read at reg_0x67_lower9_read@0x0300ebb4";
+            wire_addr = 0x67;
+            field {
+                sw = r; hw = w;
+                desc = "0.5 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, SQ setup, p.47";
+                fw_reads = "read by stock; sites on the register";
+            } rssi_sq[8:0];
+        } REG_67H @ 0x0ce;
+
+        reg {
+            name = "REG_0x68 (undocumented, read)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Read by fd6818_pa_status_fault_check (called from main_ui_background_task_loop): [15] is tested as a flag (sign) and REG_0x69/0x6A [11:0] are stored as values. The function name is a guess; meaning unknown.";
+            confidence = "STRUCTURAL";
+            fw_reads = "read at fd6818_pa_status_fault_check@0x0300efa6";
+            wire_addr = 0x68;
+            field {
+                sw = r; hw = w;
+                desc = "Tested by stock.";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } flag[15:15];
+            field {
+                sw = r; hw = w;
+                desc = "Stored by stock (0x69/0x6A).";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } value[11:0];
+        } REG_0x68 @ 0x0d0;
+
+        reg {
+            name = "REG_0x69 (undocumented, read)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Read by fd6818_pa_status_fault_check (called from main_ui_background_task_loop): [15] is tested as a flag (sign) and REG_0x69/0x6A [11:0] are stored as values. The function name is a guess; meaning unknown.";
+            confidence = "STRUCTURAL";
+            fw_reads = "read at fd6818_pa_status_fault_check@0x0300ef48, fd6818_pa_status_fault_check@0x0300ef56";
+            wire_addr = 0x69;
+            field {
+                sw = r; hw = w;
+                desc = "Tested by stock.";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } flag[15:15];
+            field {
+                sw = r; hw = w;
+                desc = "Stored by stock (0x69/0x6A).";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } value[11:0];
+        } REG_0x69 @ 0x0d2;
+
+        reg {
+            name = "REG_0x6A (undocumented, read)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Read by fd6818_pa_status_fault_check (called from main_ui_background_task_loop): [15] is tested as a flag (sign) and REG_0x69/0x6A [11:0] are stored as values. The function name is a guess; meaning unknown.";
+            confidence = "STRUCTURAL";
+            fw_reads = "read at fd6818_pa_status_fault_check@0x0300ef64";
+            wire_addr = 0x6a;
+            field {
+                sw = r; hw = w;
+                desc = "Tested by stock.";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } flag[15:15];
+            field {
+                sw = r; hw = w;
+                desc = "Stored by stock (0x69/0x6A).";
+                confidence = "STRUCTURAL";
+                fw_reads = "read by stock; sites on the register";
+            } value[11:0];
+        } REG_0x6A @ 0x0d4;
+
+        reg {
+            name = "Tone generator enables / gains";
+            desc = "Stock: 0x0000 off, 0xe0e0 (dual tone, gain 0x60), 0xe000 (tone1), 0xc000 (tone1, gain 0x40), 0x00e0 (tone2). Per the guide, tone1_gen bypasses the MIC input.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, Key beep / sidetone, p.40-41";
+            ds_value = "0x7070";
+            fw_writes = "0x00e0 at FUN_0300efd0@0x0300efd8 [unreached], FUN_03067564@0x03067570, tone_gen_config_apply@0x03067da4; 0x0000 at config_table_init_entries_0300f03c@0x0300f042, tx_teardown_config_reset@0x0300f27c, channel_type_apply_tone_idx_default@0x03059676, channel_switch_teardown_and_apply@0x0305fa64, channel_switch_teardown_and_apply@0x0305fb1e, dtmf_digit_sequence_playback_cleanup@0x03061078, dtmf_compand_config_apply@0x03063e1e, dtmf_tone_playback_from_i2c_code@0x03064a94, dtmf_tone_playback_from_i2c_stored_code@0x03064c74, flash_record_frequency_calibration_apply@0x0306710e, FUN_03067564@0x030675e6, tone_gen_config_apply@0x03067e74, FUN_03068380@0x03068416, tx_rf_frontend_init_and_burst@0x030684cc; 0xe0e0 at channel_type_apply_tone_idx_default@0x0305961c, dtmf_sequence_playback_start@0x03060f6e, dtmf_compand_config_apply@0x03063d46; 0xc000 at radio_mode_entry_reinit_and_display@0x0305bd18, channel_switch_teardown_and_apply@0x0305faf2, FUN_03068380@0x03068396, tx_rf_frontend_init_and_burst@0x03068466; 0xe000 at dtmf_tone_playback_from_i2c_code@0x030649a8, dtmf_tone_playback_from_i2c_stored_code@0x03064b86, flash_record_frequency_calibration_apply@0x03066fdc";
+            wire_addr = 0x70;
+            field {
+                sw = rw; hw = r;
+                desc = "Enable TONE1.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, Key beep / sidetone, p.40-41";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } tone1_gen[15:15] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "TONE1 gain.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, Key beep / sidetone, p.40-41";
+                fw_writes = "values written by stock: 0x0, 0x40, 0x60; sites on the register";
+            } tone1_gain[14:8] = 0x70;
+            field {
+                sw = rw; hw = r;
+                desc = "Enable TONE2.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, Key beep / sidetone, p.40-41";
+                fw_writes = "values written by stock: 0x0, 0x1; sites on the register";
+            } tone2_gen[7:7] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "TONE2 gain.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, Key beep / sidetone, p.40-41";
+                fw_writes = "values written by stock: 0x0, 0x60; sites on the register";
+            } tone2_gain[6:0] = 0x70;
+        } REG_70H @ 0x0e0;
+
+        reg {
+            name = "TONE1 frequency";
+            desc = "Word = f(kHz) * 2^26 / 6500. Stock computes it at runtime.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, Key beep / sidetone, p.41";
+            ds_value = "0x2854";
+            fw_writes = "round(arg * const) via soft-float at int_to_double_divide_convert@0x0300df76; arg at config_entry_0x71_0x72_and_gain_apply@0x0300df88; computed tone word at dtmf_tone_playback_from_i2c_code@0x03064a48, dtmf_tone_playback_from_i2c_stored_code@0x03064c20, flash_record_frequency_calibration_apply@0x03067044, flash_record_frequency_calibration_apply@0x030670b6";
+            wire_addr = 0x71;
+            field {
+                sw = rw; hw = r;
+                desc = "TONE1 frequency word.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, Key beep / sidetone, p.41";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } tone1_freq[15:0] = 0x2854;
+        } REG_71H @ 0x0e2;
+
+        reg {
+            name = "TONE2 frequency";
+            desc = "Word = f(kHz) * 2^26 / 6500. Stock writes 0x3065 (= reset) and computed values.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, Key beep / sidetone, p.41";
+            ds_value = "0x3065";
+            fw_writes = "arg at config_entry_0x71_0x72_and_gain_apply@0x0300df90; 0x3065 at FUN_0300efd0@0x0300efe2 [unreached], FUN_03067564@0x0306757a, tone_gen_config_apply@0x03067d9c";
+            wire_addr = 0x72;
+            field {
+                sw = rw; hw = r;
+                desc = "TONE2 frequency word.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66; FD6818 PG 1.0.0, Key beep / sidetone, p.41";
+                fw_writes = "values written by stock: 0x3065 (plus computed values); sites on the register";
+            } tone2_freq[15:0] = 0x3065;
+        } REG_72H @ 0x0e4;
+
+        reg {
+            name = "AFC";
+            desc = "Never written by stock (the guide's BYPASS mode writes 0x569A to disable AFC).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.66-67; FD6818 PG 1.0.0, AFC setup, p.49";
+            ds_value = "0x568A";
+            wire_addr = 0x73;
+            field {
+                sw = rw; hw = r;
+                desc = "AFC range 2.2k/1.5k/1.1k/750/550/375/275/188 Hz (x2 if wb).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66-67; FD6818 PG 1.0.0, AFC setup, p.49";
+            } afc_range[13:11] = 0x2;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = AFC off.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.66-67; FD6818 PG 1.0.0, AFC setup, p.49";
+            } afc_disable[4:4] = 0x0;
+        } REG_73H @ 0x0e6;
+
+        reg {
+            name = "REG_0x74 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Written only by an unreached switch case (FUN_0300e9f8 family). The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "per-case constant at FUN_0300e9f8@0x0300ea12 [unreached]";
+            wire_addr = 0x74;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } value[15:0];
+        } REG_0x74 @ 0x0e8;
+
+        reg {
+            name = "MCBSP control";
+            desc = "Never meaningfully written by stock: its only writer is an unreached switch case. See the guide for the full MCBSP/I2S configuration.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+            ds_value = "0x0FB4";
+            fw_writes = "per-case constant at FUN_0300e9f8@0x0300ea32 [unreached]";
+            wire_addr = 0x75;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = transmit data equals REG_78H.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } mcbsp_test[14:14] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "Frame-sync width.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } mcbsp_fwid[12:8] = 0xf;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = 32-bit, 0 = 16-bit frame.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } mcbsp_flen[7:7] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "0 = 1 data delay, 1 = 2.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } mcbsp_delay[6:6] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = master.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } mcbsp_master[5:5] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = clock-source master.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } mcbsp_clks_master[4:4] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "Clock-source polarity.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } mcbsp_clks_psel[3:3] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "Clock-source enable.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } mcbsp_clks_enable[2:2] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "0 = sample on DCLK rising edge, 1 = falling.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } mcbsp_clk_psel[1:1] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "0 = frame sync active high, 1 = active low.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.67-68";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } mcbsp_fs_psel[0:0] = 0x0;
+        } REG_75H @ 0x0ea;
+
+        reg {
+            name = "MCBSP data path";
+            desc = "Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.68";
+            ds_value = "0xE307";
+            wire_addr = 0x76;
+            field {
+                sw = rw; hw = r;
+                desc = "L/R swap in 32-bit mode, [1] TX [0] RX.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68";
+            } mcbsp_phase_swap[15:14] = 0x3;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = IQ, 0 = FM demodulated.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68";
+            } mcbsp_dsel[11:11] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = bypass FIFO.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68";
+            } mcbsp_fifo_bypass[8:8] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "Clock divider.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68";
+            } mcbsp_clkgdv[7:0] = 0x7;
+        } REG_76H @ 0x0ec;
+
+        reg {
+            name = "REG_0x77 (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). fd6818b_default_register_init writes 0x88ef. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x88ef at fd6818b_default_register_init@0x0300ed00";
+            wire_addr = 0x77;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x88ef; sites on the register";
+            } value[15:0];
+        } REG_0x77 @ 0x0ee;
+
+        reg {
+            name = "RSSI squelch thresholds";
+            desc = "Stock hw_register_0x78_write_from_byte_pair writes (x << 8) | (x - 1): open threshold x, close threshold x-1, i.e. 0.5 dB of hysteresis.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.68; FD6818 PG 1.0.0, SQ setup, p.47";
+            ds_value = "0x44FF";
+            fw_writes = "((x-1)&0xff) | (x<<8) at hw_register_0x78_write_from_byte_pair@0x0300de86";
+            wire_addr = 0x78;
+            field {
+                sw = rw; hw = r;
+                desc = "Squelch-open RSSI threshold, 0.5 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68; FD6818 PG 1.0.0, SQ setup, p.47";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } rssi_sq_th_in[15:8] = 0x44;
+            field {
+                sw = rw; hw = r;
+                desc = "Squelch-close RSSI threshold, 0.5 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68; FD6818 PG 1.0.0, SQ setup, p.47";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } rssi_sq_th_out[7:0] = 0xff;
+        } REG_78H @ 0x0f0;
+
+        reg {
+            name = "VOX close threshold";
+            desc = "Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.68; FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+            ds_value = "0x1040";
+            wire_addr = 0x79;
+            field {
+                sw = rw; hw = r;
+                desc = "Voice amplitude threshold for VOX=0.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68; FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+            } vox_amp_th_out[9:0] = 0x40;
+        } REG_79H @ 0x0f2;
+
+        reg {
+            name = "VOX delay";
+            desc = "Never written by stock.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.68; FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+            ds_value = "0x881A";
+            wire_addr = 0x7a;
+            field {
+                sw = rw; hw = r;
+                desc = "VOX=0 delay, x 128 ms.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68; FD6818 PG 1.0.0, VOX/TOT setup, p.46";
+            } vox_delay[15:12] = 0x8;
+        } REG_7AH @ 0x0f4;
+
+        reg {
+            name = "REG_0x7B (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). 0x8420 at default init (and mode-0 table); 0x318c only on the never-taken mode-1 branch. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x8420 at fd6818b_mode_register_table_apply@0x0300e730, fd6818b_default_register_init@0x0300edd4; 0x318c at fd6818b_mode_register_table_apply@0x0300e778 [unreached]";
+            wire_addr = 0x7b;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x318c, 0x8420; sites on the register";
+            } value[15:0];
+        } REG_0x7B @ 0x0f6;
+
+        reg {
+            name = "REG_0x7C (undocumented)";
+            desc = "Not in the FD6818 guide (neither the register summary nor any example). Only written (0x595e) on the never-taken mode-1 branch of the RF mode table. The guide gives no field layout; modelled as one 16-bit value.";
+            confidence = "STRUCTURAL";
+            fw_writes = "0x595e at fd6818b_mode_register_table_apply@0x0300e782 [unreached]";
+            wire_addr = 0x7c;
+            field {
+                sw = rw; hw = r;
+                desc = "Unknown.";
+                confidence = "STRUCTURAL";
+                fw_writes = "values written by stock: 0x595e; sites on the register";
+            } value[15:0];
+        } REG_0x7C @ 0x0f8;
+
+        reg {
+            name = "RX digital gain";
+            desc = "DISAGREEMENT: the guide puts dig_gain_rx at [12:8] with [7:0] reserved. Stock (config_table_entry_0x7d_indexed, from default init) writes (table[i] & 0x1f) | 0xe340 with table = 0x16,0x18,0x1a,0x1c,0x1e (default index 2 -> 0xe35a): [12:8] is a constant 3 and the selectable 5-bit value lands in [4:0]. On the FD6818B the gain field may sit at [4:0]; unproven, so both are modelled.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.68; FD6818 PG 1.0.0, RX block diagram (3), p.10";
+            ds_value = "0x4200";
+            fw_writes = "(table[idx] & 0x1f) | 0xe340, table at 0x03076a64 = 16 18 1a 1c 1e at config_table_entry_0x7d_indexed@0x0300e684";
+            wire_addr = 0x7d;
+            field {
+                sw = rw; hw = r;
+                desc = "Gain after AGC, 1 dB/step (guide). Stock writes 3.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68; FD6818 PG 1.0.0, RX block diagram (3), p.10";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } dig_gain_rx[12:8] = 0x2;
+            field {
+                sw = rw; hw = r;
+                desc = "Reserved per the guide; stock writes a table-selected 0x16..0x1e here.";
+                confidence = "STRUCTURAL";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68; FD6818 PG 1.0.0, RX block diagram (3), p.10";
+                fw_writes = "values written by stock: none constant (plus computed values); sites on the register";
+            } low5[4:0] = 0x0;
+        } REG_7DH @ 0x0fa;
+
+        reg {
+            name = "DC filters";
+            desc = "Stock writes 0x302e/0xb03f (and 0x3006 in unreached code); 0xb03f sets dcc_tx_bypass as the guide's BYPASS mode does. Bits [15:8] are reserved per the guide but stock writes 0x30/0xb0.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.68-69; FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+            ds_value = "0x341E";
+            fw_writes = "0x3006 at FUN_0300e86c@0x0300e87e [unreached]; 0x302e at config_table_init_entries_0300e884@0x0300e896; 0xb03f at config_table_init_group1_variant_0300f16c@0x0300f188; read | 0x3000 at FUN_0301bf94@0x0301bfc6 [unreached]";
+            fw_reads = "read at FUN_0301bf94@0x0301bf9a [unreached]";
+            wire_addr = 0x7e;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = MICIN DC filter bypass.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68-69; FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } dcc_tx_bypass[7:7] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = RX DC filter bypass.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68-69; FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+                fw_writes = "values written by stock: 0x0 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } dcc_rx_bypass[6:6] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "MICIN DC filter: 111 15 Hz ... 010 480 Hz.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.68-69; FD6818 PG 1.0.0, BYPASS mode (DMR/dPMR), p.38";
+                fw_writes = "values written by stock: 0x0, 0x5, 0x7 (plus computed values); sites on the register";
+                fw_reads = "read by stock; sites on the register";
+            } dcc_tx_bw[5:3] = 0x3;
+        } REG_7EH @ 0x0fc;
+
+        reg {
+            name = "Page select";
+            desc = "3-wire paging command: WRITE(0x7F, 0) selects page 0 (registers 0x00-0x7E, the default), WRITE(0x7F, 1) selects page 1 (registers 0x80-0xFF, reached at wire address reg-0x80). The 2-wire (I2C) interface addresses all registers directly with an 8-bit address and needs no paging. Not a readable register: absent from the summary table, and a real radio reads 0x0000 whatever was written. Stock never writes it, so stock only ever uses page 0.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Interface timing, p.15";
+            hw_reads = "Real radio: reads 0x0000 after any write. QEMU model: tracks the page, reads 0.";
+            wire_addr = 0x7f;
+            field {
+                sw = w; hw = r;
+                desc = "0 = page 0 (default), 1 = page 1.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Interface timing, p.15";
+            } page[0:0];
+        } REG_7FH @ 0x0fe;
+
+    } page0 @ 0x000;
+
+    regfile {
+        name = "Page 1";
+        desc = "Page 1 (write REG_7FH = 1 first on the 3-wire bus): registers 0x80-0xFF at wire address reg - 0x80. Stock firmware never selects this page.";
+        confidence = "DATASHEET";
+        ds_ref = "FD6818 PG 1.0.0, Interface timing, p.15";
+
+        reg {
+            name = "Compander amplitude";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.69; FD6818 PG 1.0.0, Voice mode, p.27";
+            wire_addr = 0x07;
+            field {
+                sw = r; hw = w;
+                desc = "Audio amplitude, 1 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.69; FD6818 PG 1.0.0, Voice mode, p.27";
+            } cmpd_db_out[6:0];
+        } REG_87H @ 0x00e;
+
+        reg {
+            name = "Soft mute";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.69; FD6818 PG 1.0.0, Soft mute, p.48";
+            ds_value = "0x8C20";
+            wire_addr = 0x10;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = soft mute on.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.69; FD6818 PG 1.0.0, Soft mute, p.48";
+            } soft_mute_en[12:12] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "Rate (SNR/gain) 1/4, 1/2, 1, 2 (summary bit positions; the soft-mute section swaps rate and atten to [7:6]/[9:8]).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.69; FD6818 PG 1.0.0, Soft mute, p.48";
+            } soft_mute_rate[9:8] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "Attenuation -16/-12/-8/-4 dB (see rate).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.69; FD6818 PG 1.0.0, Soft mute, p.48";
+            } soft_mute_atten[7:6] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "SNR threshold below which soft mute starts.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.69; FD6818 PG 1.0.0, Soft mute, p.48";
+            } snr_th_for_sm[5:0] = 0x20;
+        } REG_90H @ 0x020;
+
+        reg {
+            name = "1050 Hz decode setting";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. Only in the guide's 1050 Hz example (written as 0x11 | I2C = 0x06FD).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, 1050 Hz tone decode, p.32";
+            wire_addr = 0x11;
+            field {
+                sw = rw; hw = r;
+                desc = "Example value 0x06FD.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, 1050 Hz tone decode, p.32";
+            } value[15:0];
+        } REG_91H @ 0x022;
+
+        reg {
+            name = "DTMF/SELCALL detect";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. The 1050 Hz example writes 0x8024 | 10<<7.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.69-70; FD6818 PG 1.0.0, DTMF mode setup, p.29";
+            ds_value = "0x8F5E";
+            wire_addr = 0x14;
+            field {
+                sw = rw; hw = r;
+                desc = "Detect threshold, 1 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.69-70; FD6818 PG 1.0.0, DTMF mode setup, p.29";
+            } dtmf_det_th[12:7] = 0x1e;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = symbol/idle/symbol (DTMF), 0 = back-to-back (5-tone).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.69-70; FD6818 PG 1.0.0, DTMF mode setup, p.29";
+            } dtmf_symbol_mode[6:6] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = gain output, 0 = audio RX output.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.69-70; FD6818 PG 1.0.0, DTMF mode setup, p.29";
+            } dtmf_in_sel[5:5] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "1 = dual tone, 0 = single tone.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.69-70; FD6818 PG 1.0.0, DTMF mode setup, p.29";
+            } dtmf_mode[4:4] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "Max symbol number (15 = 0-F DTMF, 14 = EIA).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.69-70; FD6818 PG 1.0.0, DTMF mode setup, p.29";
+            } dtmf_symbol_max[3:0] = 0xe;
+        } REG_94H @ 0x028;
+
+        reg {
+            name = "RX DISC gain / RX compander";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Voice mode, p.26";
+            ds_value = "0x1AE8";
+            wire_addr = 0x16;
+            field {
+                sw = rw; hw = r;
+                desc = "DISC gain (audio + sub-audio), 0.5 dB/step, 0 = mute.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Voice mode, p.26";
+            } audio_rx_gain1[13:8] = 0x1a;
+            field {
+                sw = rw; hw = r;
+                desc = "RX compander gain, 1 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Voice mode, p.26";
+            } cmpd_rx_gain[7:3] = 0x1d;
+            field {
+                sw = rw; hw = r;
+                desc = "110 bypass with gain, 001 bypass, 000 compander on.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Voice mode, p.26";
+            } cmpd_rx_bypass[2:0] = 0x0;
+        } REG_96H @ 0x02c;
+
+        reg {
+            name = "MIC sensitivity / TX compander";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Modulation limit and MIC sensitivity, p.22";
+            ds_value = "0x0AA8";
+            wire_addr = 0x17;
+            field {
+                sw = rw; hw = r;
+                desc = "MIC sensitivity, 0.5 dB/step, 0 = mute.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Modulation limit and MIC sensitivity, p.22";
+            } mic_sens_gain[13:8] = 0xa;
+            field {
+                sw = rw; hw = r;
+                desc = "TX compander gain (0.5 dB/step in the summary, 1 dB in p.26).";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Modulation limit and MIC sensitivity, p.22";
+            } cmpd_tx_gain[7:3] = 0x15;
+            field {
+                sw = rw; hw = r;
+                desc = "110 bypass with gain, 001 bypass, 000 compander on.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Modulation limit and MIC sensitivity, p.22";
+            } cmpd_tx_bypass[2:0] = 0x0;
+        } REG_97H @ 0x02e;
+
+        reg {
+            name = "RX expander";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Voice mode, p.26";
+            ds_value = "0x7A14";
+            wire_addr = 0x18;
+            field {
+                sw = rw; hw = r;
+                desc = "100 1:3, 011 1:2.5, 010 1:2, 001 1:1.5.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Voice mode, p.26";
+            } cmpd_rx_factor[14:12] = 0x7;
+            field {
+                sw = rw; hw = r;
+                desc = "Expand above this, 2 dB units.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Voice mode, p.26";
+            } cmpd_rx_th_high[11:6] = 0x28;
+            field {
+                sw = rw; hw = r;
+                desc = "Attenuate below this, 2 dB units.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70; FD6818 PG 1.0.0, Voice mode, p.26";
+            } cmpd_rx_th_low[5:0] = 0x14;
+        } REG_98H @ 0x030;
+
+        reg {
+            name = "TX compressor";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.70-71; FD6818 PG 1.0.0, Voice mode, p.26";
+            ds_value = "0x7855";
+            wire_addr = 0x19;
+            field {
+                sw = rw; hw = r;
+                desc = "111 8:1, 110 4:1, 100 2:1, 000 1:1.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70-71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } cmpd_tx_factor[14:12] = 0x7;
+            field {
+                sw = rw; hw = r;
+                desc = "Compress above this, 2 dB units.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70-71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } cmpd_tx_th_high[11:6] = 0x21;
+            field {
+                sw = rw; hw = r;
+                desc = "Attenuate below this, 2 dB units.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.70-71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } cmpd_tx_th_low[5:0] = 0x15;
+        } REG_99H @ 0x032;
+
+        reg {
+            name = "Compander timing";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.27";
+            ds_value = "0x0728";
+            wire_addr = 0x1a;
+            field {
+                sw = rw; hw = r;
+                desc = "Amplitude detect interval, 0.64 ms/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.27";
+            } cmpd_ct_intvl[13:8] = 0x7;
+            field {
+                sw = rw; hw = r;
+                desc = "Attack speed, 0000 fastest.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.27";
+            } cmpd_atk_step[7:4] = 0x2;
+            field {
+                sw = rw; hw = r;
+                desc = "Release speed, 0000 fastest.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.27";
+            } cmpd_rls_step[3:0] = 0x8;
+        } REG_9AH @ 0x034;
+
+        reg {
+            name = "Audio filter bypasses";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.26";
+            ds_value = "0x0004";
+            wire_addr = 0x1b;
+            field {
+                sw = rw; hw = r;
+                desc = "RX 300 Hz HPF bypass.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } audio_hpf_rx_bypass[9:9] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "RX LPF1 bypass.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } audio_lpf1_rx_bypass[8:8] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "RX LPF2 bypass.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } audio_lpf2_rx_bypass[7:7] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "De-emphasis bypass.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } audio_emph_rx_bypass[6:6] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "TX 300 Hz HPF bypass.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } audio_hpf_tx_bypass[3:3] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "TX LPF1 bypass.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } audio_lpf1_tx_bypass[2:2] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "TX LPF2 bypass.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } audio_lpf2_tx_bypass[1:1] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "Pre-emphasis bypass.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71; FD6818 PG 1.0.0, Voice mode, p.26";
+            } audio_emph_tx_bypass[0:0] = 0x0;
+        } REG_9BH @ 0x036;
+
+        reg {
+            name = "DISC-mode setting";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. Only in the guide's DISC example (0x1C | I2C = 0x076F).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, DISC baseband mode, p.36-37";
+            wire_addr = 0x1c;
+            field {
+                sw = rw; hw = r;
+                desc = "Example value 0x076F.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, DISC baseband mode, p.36-37";
+            } value[15:0];
+        } REG_9CH @ 0x038;
+
+        reg {
+            name = "TX audio path select";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. The DISC example also writes 0xB9FD here (0x1D | I2C).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.71-72; FD6818 PG 1.0.0, DISC baseband mode, p.36-37";
+            ds_value = "0x29AD";
+            wire_addr = 0x1d;
+            field {
+                sw = rw; hw = r;
+                desc = "01 pre-emphasis output, 11 LPF2 output.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.71-72; FD6818 PG 1.0.0, DISC baseband mode, p.36-37";
+            } audio_tx_path_sel[3:2] = 0x3;
+        } REG_9DH @ 0x03a;
+
+        reg {
+            name = "Audio response filter A1";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. Only in the guide's audio-response example: 3 kHz RX boost writes 0xBBC0 here.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            wire_addr = 0x21;
+            field {
+                sw = rw; hw = r;
+                desc = "Filter constant.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            } value[15:0];
+        } REG_A1H @ 0x042;
+
+        reg {
+            name = "Audio response filter A2";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. Only in the guide's audio-response example: 3 kHz RX boost writes 0x2616 here.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            wire_addr = 0x22;
+            field {
+                sw = rw; hw = r;
+                desc = "Filter constant.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            } value[15:0];
+        } REG_A2H @ 0x044;
+
+        reg {
+            name = "Audio response filter A3";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. Only in the guide's audio-response example: 3 kHz TX boost writes 0xC1BB here.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            wire_addr = 0x23;
+            field {
+                sw = rw; hw = r;
+                desc = "Filter constant.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            } value[15:0];
+        } REG_A3H @ 0x046;
+
+        reg {
+            name = "Audio response filter A4";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. Only in the guide's audio-response example: 3 kHz TX boost writes 0x2226 here.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            wire_addr = 0x24;
+            field {
+                sw = rw; hw = r;
+                desc = "Filter constant.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            } value[15:0];
+        } REG_A4H @ 0x048;
+
+        reg {
+            name = "DISC-mode setting 2";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. Only in the guide's DISC example (0x27 | I2C = 0x18DA).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, DISC baseband mode, p.36-37";
+            wire_addr = 0x27;
+            field {
+                sw = rw; hw = r;
+                desc = "Example value 0x18DA.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, DISC baseband mode, p.36-37";
+            } value[15:0];
+        } REG_A7H @ 0x04e;
+
+        reg {
+            name = "TX 300 Hz response B0";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. Only in the guide's audio-response example (TX 300 Hz boost writes 0x8942).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            wire_addr = 0x30;
+            field {
+                sw = rw; hw = r;
+                desc = "Filter constant.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            } value[15:0];
+        } REG_B0H @ 0x060;
+
+        reg {
+            name = "TX 300 Hz response B1";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware. Only in the guide's audio-response example (TX 300 Hz boost writes 0x3751).";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            wire_addr = 0x31;
+            field {
+                sw = rw; hw = r;
+                desc = "Filter constant.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Audio response, p.25";
+            } value[15:0];
+        } REG_B1H @ 0x062;
+
+        reg {
+            name = "Sub-audio filters / gains";
+            desc = "Page 1: select with REG_7FH = 1 before access (3-wire). Never accessed by stock firmware.";
+            confidence = "DATASHEET";
+            ds_ref = "FD6818 PG 1.0.0, Register summary, p.72; FD6818 PG 1.0.0, Sub-audio setup, p.43";
+            ds_value = "0x9D08";
+            wire_addr = 0x36;
+            field {
+                sw = rw; hw = r;
+                desc = "RX HPF: 000 bypass, 60/30/15/8/4/2/1 Hz.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.72; FD6818 PG 1.0.0, Sub-audio setup, p.43";
+            } subau_rx_dcc_bw[12:10] = 0x7;
+            field {
+                sw = rw; hw = r;
+                desc = "TX attenuation, -6 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.72; FD6818 PG 1.0.0, Sub-audio setup, p.43";
+            } subau_tx_atten_gain[9:8] = 0x1;
+            field {
+                sw = rw; hw = r;
+                desc = "RX gain 1, -6 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.72; FD6818 PG 1.0.0, Sub-audio setup, p.43";
+            } subau_rx_gain1[7:6] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "RX gain 2, -6 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.72; FD6818 PG 1.0.0, Sub-audio setup, p.43";
+            } subau_rx_gain2[5:4] = 0x0;
+            field {
+                sw = rw; hw = r;
+                desc = "RX gain 3, -6 dB/step.";
+                confidence = "DATASHEET";
+                ds_ref = "FD6818 PG 1.0.0, Register summary, p.72; FD6818 PG 1.0.0, Sub-audio setup, p.43";
+            } subau_rx_gain3[3:0] = 0x8;
+        } REG_B6H @ 0x06c;
+
+    } page1 @ 0x100;
+};

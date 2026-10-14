@@ -1,0 +1,40 @@
+services:
+  dm32uv-re:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: dm32uv-re-pipeline
+    volumes:
+      # Everything under tools/ that is hand-maintained source is mounted live (host edits show
+      # up without a rebuild). tools/pyproject.toml and tools/.venv are NOT mounted: both are
+      # machine-specific (setup.sh rewrites pyproject.toml's [tool.uv.sources] to the local
+      # Ghidra's pyghidra wheel path, and .venv is built against that). The image bakes its own
+      # Linux-pathed versions of both at build time (see Dockerfile) - mounting the host's
+      # macOS-pathed ones over them would break pyghidra inside the container. That is also why
+      # tools/ is mounted per-subdirectory rather than as one ../tools:/work/tools mount (which
+      # would overlay the host's .venv/pyproject.toml/ghidra_project and break the same way).
+      - ../tools/src:/work/tools/src
+      - ../tools/README.md:/work/tools/README.md:ro
+      - ../tools/Makefile:/work/tools/Makefile:ro
+      # dm32_patch_api.h - read by gen_link_artifacts.py and #included by patch C code.
+      - ../tools/include:/work/tools/include:ro
+      # link/*.ld - read-write: `make link-artifacts` regenerates them in place, and the result
+      # must land on the host (they are committed), not in the throwaway container layer.
+      - ../tools/link:/work/tools/link
+      # worked examples (e.g. examples/snake/build_snake_patch.py) - read-write: their build
+      # scripts write their outputs next to themselves, same as when run on the host.
+      - ../tools/examples:/work/tools/examples
+      # generated corpus + firmware images the scripts read. data/ as a whole (read-only) so
+      # data/allocations.json (gen_link_artifacts.py's input) and data/firmware/ are both live -
+      # one directory mount instead of single-file mounts, which go stale when an editor saves
+      # by rename.
+      - ../include:/work/include:ro
+      - ../meta:/work/meta
+      - ../data:/work/data:ro
+      - ../src:/work/src:ro
+      # build output (out/dm32_stock.elf, out/link-example/...) - read-write so it lands on the
+      # host. out/ is .gitignore'd; Docker creates it on first run if it doesn't exist yet.
+      - ../out:/work/out
+    working_dir: /work/tools
+    stdin_open: true
+    tty: true

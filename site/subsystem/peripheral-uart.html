@@ -1,0 +1,63 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>peripheral-uart — DM-32UV</title><style>
+:root{--bg:#fbfbfd;--fg:#1a1a1f;--mut:#63636b;--line:#e2e2e8;--card:#fff;
+--ok:#0a7d4a;--okbg:#e6f5ec;--st:#9a6400;--stbg:#fdf2dc;--raw:#6a6a75;--rawbg:#eeeef2;--acc:#1c5fd6}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111116;--fg:#ececf1;--mut:#9a9aa6;
+--line:#2a2a33;--card:#1a1a21;--ok:#5cd39a;--okbg:#0f2e21;--st:#e8b552;--stbg:#33270d;--raw:#9a9aa6;
+--rawbg:#24242c;--acc:#7aa7ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:0 16px 72px}
+header{border-bottom:1px solid var(--line);margin-bottom:28px;padding:28px 0 20px}
+h1{margin:0 0 6px;font-size:25px;letter-spacing:-.02em}
+h2{font-size:18px;margin:34px 0 12px}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+.sub{color:var(--mut);font-size:14px;margin:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px;margin:22px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card .n{font-size:26px;font-weight:650;letter-spacing:-.02em}
+.card .l{color:var(--mut);font-size:12.5px;margin-top:3px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em;
+position:sticky;top:0;background:var(--bg);cursor:pointer;user-select:none}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+.b{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap}
+.CONFIRMED{color:var(--ok);background:var(--okbg)}
+.STRUCTURAL{color:var(--st);background:var(--stbg)}
+.RAW{color:var(--raw);background:var(--rawbg)}
+.bar{display:flex;height:7px;border-radius:4px;overflow:hidden;background:var(--rawbg);margin:5px 0 0}
+.bar i{display:block}
+input[type=search]{width:100%;padding:9px 12px;border:1px solid var(--line);border-radius:9px;
+background:var(--card);color:var(--fg);font-size:14px;margin:14px 0}
+.note{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--st);
+border-radius:0 8px 8px 0;padding:12px 15px;margin:18px 0;font-size:13.5px;color:var(--mut)}
+.note b{color:var(--fg)}
+footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);color:var(--mut);font-size:12.5px}
+</style></head><body><div class="wrap">
+<header><h1><a href="../index.html" style="color:inherit">DM-32UV firmware</a></h1>
+<p class="sub">Reverse-engineering reference &mdash; generated, not hand-written</p></header>
+<h2><code>peripheral-uart</code></h2>
+<p class="sub">17 functions &middot; 6082 bytes</p><div class="bar"><i style="width:58.82%;background:var(--ok)"></i><i style="width:41.18%;background:var(--st)"></i></div>
+
+<input type="search" placeholder="Filter functions&hellip;">
+<table><thead><tr><th>Address</th><th>Function</th><th>Size</th><th>Callers</th><th>Callees</th>
+<th>Confidence</th><th>Assigned by</th></tr></thead><tbody><tr><td><code>0x0002c0f8</code></td><td><code>serial_flash_sector_erase_then_poll_ready</code></td><td data-v="102">102</td><td data-v="2">2</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x0002c160</code></td><td><code>serial_flash_write_chunk_with_retry</code></td><td data-v="78">78</td><td data-v="2">2</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x03002c30</code></td><td><code>serial_command_phase_tracker_and_dispatch</code></td><td data-v="152">152</td><td data-v="2">2</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x030c3f24</code></td><td><code>serial_clock_out_byte_to_companion_chip</code></td><td data-v="282">282</td><td data-v="2">2</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0002ce78</code></td><td><code>uart_tx_poll_mutex_guarded</code></td><td data-v="42">42</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x03001bc8</code></td><td><code>uart0_set_baud_divisor</code></td><td data-v="56">56</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x030118b0</code></td><td><code>serial_rx_ringbuffer_line_extract</code></td><td data-v="124">124</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0301d9d4</code></td><td><code>uart_tx_chunked_mutex_send</code></td><td data-v="116">116</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0301da48</code></td><td><code>uart0_init</code></td><td data-v="96">96</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x030253a0</code></td><td><code>serial_frame_classify_and_extract_ids</code></td><td data-v="372">372</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x03025514</code></td><td><code>serial_9bit_frame_handler_with_crc_validate</code></td><td data-v="1662">1662</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0302a044</code></td><td><code>serial_protocol_vframe_command_loop</code></td><td data-v="1042">1042</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0302a4dc</code></td><td><code>serial_protocol_vframe_command_loop_variant</code></td><td data-v="1252">1252</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0302b2b8</code></td><td><code>serial_password_command_handler</code></td><td data-v="262">262</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x03067978</code></td><td><code>uart_rx_frame_assemble_polarity_correct</code></td><td data-v="362">362</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x030119f4</code></td><td><code>uart_tx_string_with_trailer</code></td><td data-v="76">76</td><td data-v="0">0</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x03028c5e</code></td><td><code>serial_9bit_frame_validate_entry</code></td><td data-v="6">6</td><td data-v="0">0</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr></tbody></table>
+<footer>Generated output. Every figure here is derived from the decompiled corpus; none of it
+is hand-maintained. Confidence markers are load-bearing &mdash; read them before relying on
+anything.</footer>
+</div><script>
+function mkSort(t){[...t.tHead.rows[0].cells].forEach((th,i)=>{th.onclick=()=>{
+ const tb=t.tBodies[0],rows=[...tb.rows],asc=th.dataset.a!=='1';
+ [...t.tHead.rows[0].cells].forEach(c=>c.dataset.a='');th.dataset.a=asc?'1':'0';
+ rows.sort((x,y)=>{const a=x.cells[i].dataset.v??x.cells[i].innerText,b=y.cells[i].dataset.v??y.cells[i].innerText;
+ const na=parseFloat(a),nb=parseFloat(b);
+ return (!isNaN(na)&&!isNaN(nb))?(asc?na-nb:nb-na):(asc?String(a).localeCompare(b):String(b).localeCompare(a));});
+ rows.forEach(r=>tb.appendChild(r));};});}
+function mkFilter(inp,t){inp.oninput=()=>{const q=inp.value.toLowerCase();
+ [...t.tBodies[0].rows].forEach(r=>{r.style.display=r.innerText.toLowerCase().includes(q)?'':'none';});};}
+
+document.querySelectorAll('table').forEach(mkSort);
+const s=document.querySelector('input[type=search]');if(s)mkFilter(s,document.querySelector('table'));
+</script></body></html>

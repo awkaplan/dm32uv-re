@@ -1,0 +1,25 @@
+{
+ "_comment": "Flash regions outside the vendor update file that are nevertheless occupied on every DM-32UV running this build. Offsets are relative to flash base 0x03000000.",
+ "occupied": [
+  {
+   "start": "0x0000b000",
+   "end": "0x0000c000",
+   "what": "PER-UNIT parameter sector, different on every radio: +0x10c is a 4-byte record derived from the SoC's eFuse ID (the hardware-binding check in channel_change_detect_reset_and_redisplay @0x0305f838 compares it), +0x80..+0x82 and +0xa0..+0xa1 are per-unit hardware bytes (hw_port_state_poll_into_ram_mirror @0x0305ef44), plus strings on some units. Blanked to 0xFF in every image this repo ships (scrub_unit_sector.py), so it LOOKS erased here; it is never free space and must never be written from another unit's image."
+  },
+  {
+   "start": "0x000bfc20",
+   "end": "0x000decb8",
+   "what": "IRAM load image: the boot stub at 0x0300c046 copies flash 0x030bfc20..0x030decb8 to IRAM 0x00010000..0x0002f098 (code + initialised data of the SoC runtime: uC/OS-III, drivers). The vendor update file DM32.00.01.048.bin ends at 0x000d2100, i.e. inside this image; the bytes from 0x000d2100 on are reproduced here from a radio read and match the live IRAM dump. Vendor firmware, not per-unit."
+  },
+  {
+   "start": "0x000decb8",
+   "end": "0x000e04c0",
+   "what": "Trailing vendor data after the IRAM image (referenced from flash code at 0x030ddc64/0x030de800/0x030dff01; identity not decoded). Same provenance class as the IRAM image."
+  },
+  {
+   "start": "0x00072000",
+   "end": "0x000763fc",
+   "what": "SRAM initialised-data image: the boot stub copies flash 0x03072000.. to SRAM 0x18000800..0x18004bfc."
+  }
+ ]
+}

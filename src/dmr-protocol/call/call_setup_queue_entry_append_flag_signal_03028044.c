@@ -1,0 +1,35 @@
+/*
+ * Decompiler reconstruction for interoperability research; not Baofeng source code.
+ * Source binary: DM32.00.01.048.bin (app region, file offset 0x1000+)
+ *   SHA-256: 0791558d1471415556bcea941e161cd695937edd41b7e8ed38a18bdca2556147
+ * Function: call_setup_queue_entry_append_flag_signal @ 03028044 (file base 0x03000000; code starts at 0x03001000)
+ * Size: 32 bytes
+ * Confidence: STRUCTURAL (inferred from code shape and call context; plausible but unverified)
+ */
+
+
+/* Subsystem: dmr-protocol
+ * Confidence: STRUCTURAL - inferred from code shape and call context; plausible but unverified.
+ *
+ * GENERATED FILE - do not edit; regenerate from the source project.
+ */
+#include "dm32/dm32.h"
+
+/* Confidence: STRUCTURAL - inferred from code shape and call context; plausible but unverified. */
+
+void call_setup_queue_entry_append_flag_signal(void)
+
+{
+  byte bVar1;
+  undefined4 *puVar2;
+  undefined4 in_r3;
+  undefined4 in_stack_00000018;
+  
+  puVar2 = PTR_DAT_03028204;
+  bVar1 = *(byte *)p_dmr_call_config_state;
+  PTR_DAT_03028204[bVar1 + 8] = in_r3;
+  puVar2[bVar1 + 6] = in_stack_00000018;
+  OSFlagPost_wrapper_set_fixed_grp(0x4000000);
+  return;
+}
+

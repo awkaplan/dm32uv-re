@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "Hand-maintained (data/ is hand-maintained; meta/ is generated - do not move this file).",
+    "Named DM32_KEYSEQ scripts, consumed by tools/src/dm32_patch_tools/keyseq_lib.py.",
+    "The raw keyseq grammar (cb:cbit:rb:rbit:hold:gap;... with -1 lead-ins) is documented in",
+    "tools/src/dm32_patch_tools/qemu_run.py's module docstring ('KEYSEQ GRAMMAR').",
+    "Keep in sync with tools/src/dm32_patch_tools/qemu_boot_diff.py (PROBE_KEYSEQ) and",
+    "tests/test_image_snake.py (SNAKE_KEYSEQ)."
+  ],
+  "scenarios": {
+    "probe": {
+      "keyseq": "-1:0:1:31:0:400;-1:0:1:17:20:120;2:10:1:17:20:300;-1:0:1:31:0:200",
+      "until_step": 4,
+      "description": "Wait for standby (lead-in, no key), MENU to the top-level menu, BACK to standby, then a short tail so the standby repaint after BACK settles. The default probe key script used by qemu_boot_diff / verify_patch.",
+      "source": "tools/src/dm32_patch_tools/qemu_boot_diff.py (PROBE_KEYSEQ)"
+    },
+    "snake-walkthrough": {
+      "keyseq": "-1:0:1:31:0:20;-1:0:1:17:20:120;2:11:1:17:60:400;2:7:1:17:60:400;2:7:1:17:60:600;2:11:1:18:150:500;2:8:1:20:150:500;2:11:1:17:150:500;2:8:1:18:150:500;2:10:1:17:150:900;2:10:1:17:150:900",
+      "until_step": 11,
+      "description": "Codeplug-less Snake walkthrough: MENU, Up (wraps to SNAKE), OK (sub-list), OK (Play), four direction changes (2/4/6/8 keys), Back, Back. Produces the measured screen sequence 0, 580, (optional 2993), 13618, 13309, 9472, then game frames (1175 between direction changes) and the stock UI after Back (2993/2997).",
+      "source": "tests/test_image_snake.py (SNAKE_KEYSEQ); tools/examples/snake/README.md '2. Verify under QEMU'"
+    },
+    "menu-from-standby": {
+      "keyseq": "-1:0:1:31:0:20;-1:0:1:17:20:120",
+      "until_step": 2,
+      "description": "Wait for standby (lead-in, no key), then MENU to the top-level menu - the first two steps of every codeplug-less navigation script.",
+      "source": "docs/qemu-workflow.md 'A generic codeplug' example keyseq; tests/test_image_snake.py (SNAKE_KEYSEQ first steps)"
+    },
+    "long-back-channel-mode": {
+      "keyseq": "-1:0:1:31:0:20;2:10:1:17:3000:600;-1:0:1:17:20:120;2:11:1:18:60:300;2:7:1:17:60:400;2:7:1:17:60:400;2:11:1:18:60:300;2:7:1:17:60:400",
+      "until_step": 8,
+      "description": "With the generic codeplug: long-press Back (3000 holds) switches the A side to channel mode, MENU, then Menu > Zone > 'Zone List 1/3' > Zone-Ana > Channel List ('Channel 10'..'Channel 16'). Frames end at F14:12763 (channel-mode standby) with menu frames 11530/11385/10669/11295/10773.",
+      "source": "docs/qemu-workflow.md 'A generic codeplug' (channel-mode key sequence)"
+    }
+  }
+}

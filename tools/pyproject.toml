@@ -1,0 +1,43 @@
+[project]
+name = "dm32-patch-tools"
+version = "0.1.0"
+description = "Standalone pyghidra-based patch-building tooling for the dm32uv-re corpus"
+authors = [
+    { name = "Alex Kaplan", email = "awkaplan@gmail.com" }
+]
+license = "PolyForm-Noncommercial-1.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "pyghidra==3.1.0",
+    "jpype1==1.5.2",
+]
+
+# Machine-readable chip and format descriptions under ../specs/ (SystemRDL register maps,
+# Kaitai Struct formats). Optional: `uv sync --group specs`. The Kaitai compiler itself is a Java
+# tool, not a Python package; see ../specs/README.md.
+[dependency-groups]
+specs = [
+    "systemrdl-compiler==1.32.2",
+    "peakrdl==1.5.0",
+    "peakrdl-cheader==1.1.0",
+    "peakrdl-html==2.12.2",
+    "kaitaistruct==0.11",
+]
+
+[project.scripts]
+dm32-patch-tools = "dm32_patch_tools:main"
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
+
+# pyghidra is intentionally NOT resolved from PyPI. It must be the exact wheel the
+# locally-installed Ghidra ships (it loads that build's Java classes, including this
+# project's C-SKY Sleigh extension) - a PyPI release could be a different Ghidra version
+# with different pcode behavior. ./setup.sh locates Ghidra and appends the machine-local
+#
+#   [tool.uv.sources]
+#   pyghidra = { path = "<ghidra>/Ghidra/Features/PyGhidra/pypkg/dist/pyghidra-X.Y.Z-py3-none-any.whl" }
+#
+# entry below this comment, then runs `uv sync`. This committed file deliberately carries no
+# such entry (it would be an absolute path on one machine): do not commit setup.sh's edit.

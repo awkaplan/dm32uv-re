@@ -1,0 +1,31 @@
+/*
+ * Decompiler reconstruction for interoperability research; not Baofeng source code.
+ * Source binary: DM32.00.01.048.bin (app region, file offset 0x1000+)
+ *   SHA-256: 0791558d1471415556bcea941e161cd695937edd41b7e8ed38a18bdca2556147
+ * Function: display_set_cursor_pos @ 03017978 (file base 0x03000000; code starts at 0x03001000)
+ * Size: 44 bytes
+ * Confidence: STRUCTURAL (inferred from code shape and call context; plausible but unverified)
+ */
+
+
+/* Subsystem: display-driver
+ * Confidence: STRUCTURAL - inferred from code shape and call context; plausible but unverified.
+ *
+ * GENERATED FILE - do not edit; regenerate from the source project.
+ */
+#include "dm32/dm32.h"
+
+/* Confidence: STRUCTURAL - inferred from code shape and call context; plausible but unverified. */
+
+void display_set_cursor_pos(uint param_1,ushort param_2)
+
+{
+  lcd_write_command(MIPI_DCS_SET_COLUMN_ADDRESS);
+  lcd_write_data((param_1 & 0xffff) >> 8);
+  lcd_write_data(param_1 & 0xff);
+  lcd_write_command(MIPI_DCS_SET_PAGE_ADDRESS);
+  lcd_write_data(param_2 >> 8);
+  lcd_write_data(param_2 & 0xff);
+  return;
+}
+

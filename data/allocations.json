@@ -1,0 +1,97 @@
+{
+ "_comment": [
+  "Hand-maintained source of truth for which parts of the patch windows are already claimed.",
+  "tools/src/dm32_patch_tools/gen_link_artifacts.py reads this file (plus",
+  "data/firmware/patching/occupied_regions.json and the full stock image) and generates",
+  "tools/link/dm32_patch_memory.ld: MEMORY regions for whatever is left free, and a NOLOAD",
+  "reservation for every claim below, so a patch that overlaps one fails to link.",
+  "To claim space for a new patch: add an entry here, re-run gen_link_artifacts.py, commit both.",
+  "Every address is ABSOLUTE (flash at 0x03000000, SRAM at 0x18000000). Every range is",
+  "[start, end_exclusive). Flash claims must be whole 4 KiB sectors: the radio is written one",
+  "sector at a time, so two patches sharing a sector would overwrite each other."
+ ],
+ "windows": [
+  {
+   "name": "flash",
+   "start": "0x030e1000",
+   "end_exclusive": "0x03100000",
+   "align": "0x1000",
+   "what": "Program-flash sectors 225-255: the only fully erased sectors in the stock image apart from the per-unit sector 0x0300b000 (which is blanked, not free). 0x03100000 is the end of the 1 MB GD25Q80.",
+   "source": "docs/rtos-and-memory.md 'Flash program memory' (re-checked 2026-10-10 against data/firmware/patching/progmem_stock_DP570UV_20260926_FULL.bin); gen_link_artifacts.py re-verifies every byte is 0xFF on each run"
+  },
+  {
+   "name": "sram",
+   "start": "0x18004c00",
+   "end_exclusive": "0x18008000",
+   "align": "0x4",
+   "what": "SRAM above the initialised-data image (0x18000800-0x18004bfc) and below the end of the 32 KB SRAM. No literal in the flash image or the IRAM dump points into it (highest SRAM reference is 0x18004bfc, from 0x0300c0c8).",
+   "source": "tools/include/dm32_patch_api.h PATCH_SRAM_SCRATCH_LO/_HI; docs/rtos-and-memory.md 'SRAM'; tools/examples/snake/snake_game.ld header comment (QEMU r39 read-back)"
+  },
+  {
+   "name": "iram",
+   "start": "0x00050400",
+   "end_exclusive": "0x00058000",
+   "align": "0x4",
+   "what": "IRAM above the last referenced kernel data: 31 KB with zero literal references in flash and IRAM, byte-identical across 5 same-session live captures in 5 modes, and 17-31% of bytes differing across power cycles, which is SRAM power-up remanence (a few percent of bits per cycle) rather than program writes, so it is real unwritten RAM. NOT yet proven free under an active DMR call, TX, GPS or APRS (no capture covers them; a literal scan also misses addresses built with movih/ori). A canary was written at 0x00056000 on 2026-11-01 as the test; a claim here is provisional until it has been read back after those modes. Like SRAM it holds power-on noise, so a patch must gate its state on its own magic. Not covered by gen_link_artifacts.py (it knows only the flash and sram windows); build_manifest_patch.py reads this window for 'iram' claims.",
+   "source": "dm32uv-harness docs/PLAN.md 3.1 (2026-11-01)"
+  }
+ ],
+ "forbidden": [
+  {
+   "name": "per_unit_sector",
+   "start": "0x0300b000",
+   "end_exclusive": "0x0300c000",
+   "what": "PER-UNIT parameter sector (eFuse-derived hardware-binding record at +0x10c, per-unit hardware bytes). Reads as 0xFF in every shipped image because it is scrubbed, never because it is free.",
+   "source": "data/firmware/patching/README.md 'The per-unit sector'; occupied_regions.json; CLAUDE.md"
+  },
+  {
+   "name": "alpu_bypass_sector",
+   "start": "0x030c6000",
+   "end_exclusive": "0x030c7000",
+   "what": "Sector holding the ALPU-MP anti-clone bypass when applied (inside the IRAM load image anyway).",
+   "source": "docs/rtos-and-memory.md 'Absolute rules'; data/firmware/patching/README.md"
+  }
+ ],
+ "allocations": [
+  {
+   "name": "ramdump_probe_code",
+   "space": "flash",
+   "start": "0x030e1000",
+   "end_exclusive": "0x030e2000",
+   "owner": "live-RAM-capture probe family (RAMDUMP / megaprobe / audioprobe / pllprobe handlers), whole-sector handler, sector 225",
+   "source": "tools/src/dm32_patch_tools/export_patch_sites.py id 'megaprobe-handler' (addr 0x030E1000, hardware-verified); docs/rtos-and-memory.md 'Known allocations'; docs/live-ram-capture.md; tools/examples/build_overlay_image.py HANDLER"
+  },
+  {
+   "name": "snake_code",
+   "space": "flash",
+   "start": "0x030e8000",
+   "end_exclusive": "0x030ea000",
+   "owner": "Snake example patch: game handler, category entry, trampolines, strings and relocated jump/label tables (sectors 232-233)",
+   "source": "tools/examples/snake/build_snake_patch.py SNAKE_*_ADDR constants (0x030e8000..0x030e91b0); tools/examples/snake/snake_game.ld; docs/rtos-and-memory.md 'Known allocations'"
+  },
+  {
+   "name": "snake_state",
+   "space": "sram",
+   "start": "0x18007000",
+   "end_exclusive": "0x18007310",
+   "owner": "Snake example patch .bss (game state, 0x310 bytes)",
+   "source": "tools/examples/snake/snake_game.ld (.bss 0x18007000); tools/include/dm32_patch_api.h; docs/rtos-and-memory.md 'Already allocated inside that window'"
+  },
+  {
+   "name": "overlay_guard",
+   "space": "sram",
+   "start": "0x18007fe0",
+   "end_exclusive": "0x18007ff0",
+   "owner": "overlay_trampoline.S re-entrancy GUARD word (4 bytes used; the 16-byte slot up to the RAMDUMP cursor is reserved with it)",
+   "source": "tools/examples/overlay_trampoline.S (.equ GUARD, 0x18007FE0); tools/include/dm32_patch_api.h"
+  },
+  {
+   "name": "ramdump_cursor",
+   "space": "sram",
+   "start": "0x18007ff0",
+   "end_exclusive": "0x18008000",
+   "owner": "RAMDUMP live-RAM-read patch dump cursor (16 bytes, top of SRAM)",
+   "source": "tools/include/dm32_patch_api.h; docs/rtos-and-memory.md; tools/src/dm32_patch_tools/dm32_ramdump.py (sub-ids 0x3f/0x40)"
+  }
+ ]
+}

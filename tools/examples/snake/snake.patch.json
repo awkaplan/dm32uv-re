@@ -1,0 +1,178 @@
+{
+  "_comment": [
+    "Manifest form of build_snake_patch.py: the same six blobs, eight data items and eleven splices, at",
+    "the same addresses. Build with tools/src/dm32_patch_tools/build_manifest_patch.py. It reproduces",
+    "progmem_SNAKE_patched.bin byte for byte (see that script's --compare). The WHY for every address",
+    "is in build_snake_patch.py's comments and HISTORY.md, so it is not repeated here."
+  ],
+  "name": "snake",
+  "description": "Snake as an 11th top-level menu category with a one-item sub-list (v12+ design).",
+  "output_image": "progmem_SNAKE_patched.bin",
+  "allocations": ["snake_code", "snake_state"],
+
+  "verify": {
+    "keyseq": "snake-walkthrough",
+    "settle_after": 25,
+    "timeout": 500,
+    "expect_frames": [
+      0,
+      580,
+      {"name": "standby-blank-chip"},
+      {"min": 13300, "max": 14300},
+      {"name": "snake-category-sublist"},
+      {"name": "snake-game"}, {"name": "snake-game-keyoverlay"},
+      {"name": "snake-game"}, {"name": "snake-game-keyoverlay"},
+      {"name": "snake-game"}, {"name": "snake-game-keyoverlay"},
+      {"name": "snake-game"}, {"name": "snake-game-keyoverlay"},
+      {"name": "snake-game"},
+      {"name": "after-back-stock-ui"},
+      {"name": "after-back-stock-ui"}
+    ]
+  },
+
+  "symbols": {
+    "STOCK_CASE_TAIL": "0x0303d872",
+    "OK_EPILOGUE": "0x0303cde6",
+    "SUBTYPE_ICON_LIST": 2
+  },
+
+  "blobs": [
+    {
+      "name": "snake_game",
+      "why": "snake_screen_handler; snake_game.ld forces it first at 0x030e8000 and puts .bss at SRAM 0x18007000",
+      "sources": ["snake_game.c"],
+      "cflags": ["-O2", "-Wall", "-ffunction-sections"],
+      "linker_script": "snake_game.ld",
+      "entry": "snake_screen_handler",
+      "expect_entry": "0x030e8000",
+      "sections": [".text", ".rodata"]
+    },
+    {
+      "name": "snake_category_entry",
+      "sources": ["snake_category_entry.c"],
+      "cflags": ["-O2", "-Wall", "-ffunction-sections"],
+      "link_address": "0x030e8800",
+      "defsym": {"snake_submenu_descriptor": "@snake_subdesc"},
+      "entry": "snake_category_entry",
+      "expect_entry": "0x030e8800",
+      "sections": [".text", ".rodata"]
+    },
+    {
+      "name": "snake_menu_append",
+      "sources": ["snake_menu_append_trampoline.S"],
+      "cflags": [],
+      "link_address": "0x030e8900",
+      "entry": "snake_menu_append",
+      "expect_entry": "0x030e8900",
+      "sections": [".text"]
+    },
+    {
+      "name": "snake_ok_stub",
+      "why": "11th OK-path entry: bsr snake_category_entry; lrw r3, OK_EPILOGUE; jmp r3",
+      "sources": ["snake_ok_stub.S"],
+      "cflags": [],
+      "link_address": "0x030e9050",
+      "defsym": {"SNAKE_CATENTRY": "@snake_category_entry", "OK_EPILOGUE": "@OK_EPILOGUE"},
+      "entry": "snake_ok_stub",
+      "expect_entry": "0x030e9050",
+      "sections": [".text"]
+    },
+    {
+      "name": "snake_render_stub",
+      "why": "render-path case-block stub (HISTORY.md v11)",
+      "sources": ["snake_tail_stub.S"],
+      "cflags": [],
+      "link_address": "0x030e91a0",
+      "defsym": {"HANDLER": "@snake_category_entry", "EPILOGUE": "@STOCK_CASE_TAIL"},
+      "entry": "snake_tail_stub",
+      "expect_entry": "0x030e91a0",
+      "sections": [".text"]
+    },
+    {
+      "name": "snake_item_stub",
+      "why": "item-path case-block stub: launches the game",
+      "sources": ["snake_tail_stub.S"],
+      "cflags": [],
+      "link_address": "0x030e91b0",
+      "defsym": {"HANDLER": "@snake_game", "EPILOGUE": "@STOCK_CASE_TAIL"},
+      "entry": "snake_tail_stub",
+      "expect_entry": "0x030e91b0",
+      "sections": [".text"]
+    }
+  ],
+
+  "data": [
+    {"name": "snake_label", "addr": "0x030e9000",
+     "parts": [{"string": "SNAKE"}, {"align": 4}]},
+    {"name": "snake_item_label", "addr": "0x030e9010",
+     "parts": [{"string": "Play"}, {"align": 4}]},
+    {"name": "snake_item_array", "addr": "0x030e9020",
+     "parts": [{"u32": ["@snake_item_label"]}]},
+    {"name": "snake_subdesc", "addr": "0x030e9030",
+     "why": "2 x {u32 array_ptr, u8 count, u8 subtype, u16 pad}, same layout as stock GNSS/APRS descriptors",
+     "parts": [
+       {"struct": "<IBBH", "values": ["@snake_item_array", 1, "@SUBTYPE_ICON_LIST", 0]},
+       {"struct": "<IBBH", "values": ["@snake_item_array", 1, "@SUBTYPE_ICON_LIST", 0]}
+     ]},
+    {"name": "snake_catjmp", "addr": "0x030e9060",
+     "why": "render-path table: ten stock case blocks + Snake's render stub",
+     "parts": [
+       {"stock_u32": "0x030aff74", "count": 10,
+        "expect": ["0x0303da4c", "0x0303da9a", "0x0303dae8", "0x0303db72", "0x0303dbf6",
+                   "0x0303dc44", "0x0303dc92", "0x0303dccc", "0x0303dd06", "0x0303dd40"]},
+       {"u32": ["@snake_render_stub"]}
+     ]},
+    {"name": "snake_labelarr_lang0", "addr": "0x030e90a0",
+     "parts": [{"stock_u32": "0x030b7d68", "count": 10}, {"u32": ["@snake_label"]}]},
+    {"name": "snake_labelarr_lang1", "addr": "0x030e90e0",
+     "parts": [{"stock_u32": "0x030b7d90", "count": 10}, {"u32": ["@snake_label"]}]},
+    {"name": "snake_okjmp", "addr": "0x030e9120",
+     "why": "OK-path table: ten stock 6-byte stubs + Snake's OK stub",
+     "parts": [
+       {"stock_u32": "0x030afef0", "count": 10,
+        "expect": ["0x0303cdac", "0x0303cdb2", "0x0303cdb8", "0x0303cdbe", "0x0303cdc4",
+                   "0x0303cdca", "0x0303cdd0", "0x0303cdd6", "0x0303cddc", "0x0303cde2"]},
+       {"u32": ["@snake_ok_stub"]}
+     ]},
+    {"name": "snake_itemjmp", "addr": "0x030e9160",
+     "why": "item-action table: ten stock case blocks + Snake's item stub",
+     "parts": [
+       {"stock_u32": "0x030aff18", "count": 10,
+        "expect": ["0x0303cf1c", "0x0303cf68", "0x0303cf70", "0x0303cf78", "0x0303cf80",
+                   "0x0303cfbe", "0x0303cfc6", "0x0303d1b4", "0x0303d2a0", "0x0303d54c"]},
+       {"u32": ["@snake_item_stub"]}
+     ]}
+  ],
+
+  "splices": [
+    {"name": "menu_append_hook", "addr": "0x03049dcc", "expect": "a3 05 00 00",
+     "why": "br16 0x304a112 ; bkpt -> bsr trampoline (appends category index 10)",
+     "branch": {"kind": "bsr", "target": "@snake_menu_append"}},
+
+    {"name": "render_bound", "addr": "0x0303da02", "expect": "09 3a", "bytes": "0a 3a"},
+    {"name": "render_table_ptr", "addr": "0x0303da48", "expect_u32": "0x030aff74", "u32": "@snake_catjmp"},
+    {"name": "ok_bound", "addr": "0x0303cd8e", "expect": "09 3a", "bytes": "0a 3a"},
+    {"name": "ok_table_ptr", "addr": "0x0303cda8", "expect_u32": "0x030afef0", "u32": "@snake_okjmp"},
+    {"name": "item_bound", "addr": "0x0303ced8", "expect": "09 3a", "bytes": "0a 3a"},
+    {"name": "item_table_ptr", "addr": "0x0303cf18", "expect_u32": "0x030aff18", "u32": "@snake_itemjmp"},
+
+    {"name": "lang0_label_ptr", "addr": "0x030b7db8", "expect_u32": "0x030b7d68", "u32": "@snake_labelarr_lang0"},
+    {"name": "lang0_label_count", "addr": "0x030b7dbc", "expect_u8": "0x0a", "u8": "0x0b"},
+    {"name": "lang1_label_ptr", "addr": "0x030b7dc0", "expect_u32": "0x030b7d90", "u32": "@snake_labelarr_lang1"},
+    {"name": "lang1_label_count", "addr": "0x030b7dc4", "expect_u8": "0x0a", "u8": "0x0b"}
+  ],
+
+  "asserts": [
+    {"name": "ok_stub0_tail", "addr": "0x0303cdb0", "expect": "1b 04",
+     "why": "the ten stock OK stubs are bsr + br16 0x0303cde6; stubs 0-8 are checked here (stub 9 falls through)"},
+    {"name": "ok_stub1_tail", "addr": "0x0303cdb6", "expect": "18 04"},
+    {"name": "ok_stub2_tail", "addr": "0x0303cdbc", "expect": "15 04"},
+    {"name": "ok_stub3_tail", "addr": "0x0303cdc2", "expect": "12 04"},
+    {"name": "ok_stub4_tail", "addr": "0x0303cdc8", "expect": "0f 04"},
+    {"name": "ok_stub5_tail", "addr": "0x0303cdce", "expect": "0c 04"},
+    {"name": "ok_stub6_tail", "addr": "0x0303cdd4", "expect": "09 04"},
+    {"name": "ok_stub7_tail", "addr": "0x0303cdda", "expect": "06 04"},
+    {"name": "ok_stub8_tail", "addr": "0x0303cde0", "expect": "03 04"},
+    {"name": "lang_header_byte5s", "addr": "0x030b7dbd", "expect": "02 00 00"}
+  ]
+}

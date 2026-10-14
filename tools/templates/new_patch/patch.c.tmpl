@@ -1,0 +1,42 @@
+/*
+ * __PATCH_NAME__.c -- patch handler (scaffolded by tools/src/dm32_patch_tools/new_patch.py).
+ *
+ * SHAPE: a call-site redirect, the simplest hook that a plain C function can serve. The one splice
+ * in __PATCH_NAME__.patch.json replaces a stock `bsr <callee>` with `bsr __PATCH_NAME___entry`.
+ * This handler therefore runs exactly where the callee ran, with the callee's arguments still in
+ * r0-r3 (and on the stack from the 5th on). It must first do the callee's job by calling the
+ * callee BY NAME and passing those arguments through, then do its own work.
+ *
+ * No address appears in this file. tools/link/dm32_stock_symbols.ld (INCLUDEd by
+ * __PATCH_NAME__.ld) supplies the callee's address. tools/link/dm32_patch_memory.ld decides
+ * where this code and its .bss live.
+ *
+ * Before you rely on this:
+ *   - Declare the callee's REAL prototype. Read its decompiled source under src/, or
+ *     `make -C tools lookup Q=<name> ARGS=--c`. Take arguments and return value from there,
+ *     not from the name.
+ *   - Check what the caller does after the call. Ideally the stock caller assumes only the ABI:
+ *     r4-r11 preserved, r0 = return value. Stock is GCC -O2, though, and a caller may rely on a
+ *     scratch register that its particular callee happens not to touch. Disassemble a few
+ *     instructions after the hook site (tools/src/dm32_patch_tools/cs_disasm.py) and confirm the
+ *     caller reloads or ignores r1-r3/r12/r13 before using them.
+ *   - Do not #include dm32_patch_api.h here. Its macros of the same names would bypass the linker.
+ */
+typedef unsigned short u16;
+
+/* TODO: the stock function the hook site originally called. This default matches the example
+ * hook site given in README.md (0x0301375c in keypad_poll_and_dispatch_key_event). */
+void lcd_bus_restore_after_keypad_scan(void);
+
+/* Zero-initialised state goes to .bss in PATCH_SRAM. Nothing clears it at boot, and nothing copies
+ * initialised data, so a patch may not have a .data section (the linker script asserts this).
+ * The symbol is global so the build summary and gdb_rsp.py can locate it, and so the manifest
+ * can reference it as "@__PATCH_NAME__:__PATCH_NAME___hits". */
+volatile unsigned int __PATCH_NAME___hits;
+
+__attribute__((section(".text.__PATCH_NAME___entry")))
+void __PATCH_NAME___entry(void)
+{
+    lcd_bus_restore_after_keypad_scan();   /* 1. what the displaced bsr did (keep this first) */
+    __PATCH_NAME___hits++;                  /* 2. TODO: this patch's own work */
+}

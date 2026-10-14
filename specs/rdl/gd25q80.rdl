@@ -1,0 +1,316 @@
+// gd25q80.rdl - GigaDevice GD25Q80, 8 Mbit (1 MB) SPI NOR flash: the DM-32UV PROGRAM flash
+// (boot header, bootloader, application; executed in place through the HR_C7000 LCSFC).
+//
+// Part number: GD25Q80 ("Q80" = 8 Mbit). Some older notes spell it "GD25Q08"; that is a digit
+// transposition, not a different part. The radio's chip is marked GD25Q80ETIG (E revision); the
+// only datasheet available is the C revision: "GD25Q80CxIGx 3.3V Uniform Sector Dual and Quad
+// Serial Flash", Rev 1.0, 49 pp, elm-tech.com edition (cited as "GD25Q80C Rev 1.0"). Register
+// and opcode details are taken from the C revision; where E differs is unknown. Page numbers are
+// PDF page indices (equal to the printed "49 - n" footers in this edition).
+// Stock-firmware evidence: DM32.00.01.048 (IRAM image and program flash), instruction-level trace.
+//
+// LAYOUT CONVENTION: as w25q128jv.rdl - `status` (wire_addr = the opcode that reads the register,
+// wr_cmd = the opcode(s) that write it, nonvolatile on stored bits), `id`, and `cmd` (one
+// pseudo-register per opcode at offset = opcode, constant field `opcode`; erase / program /
+// status-write / security-register erase+program opcodes carry destructive = true).
+//
+// HOW THE STOCK FIRMWARE TALKS TO THIS CHIP (two paths, neither documented by the HR_C7000
+// datasheet, so the attribution of bytes to SPI opcodes is STRUCTURAL):
+//  1. LCSFC store interface. The firmware issues commands by STORING into the XIP window: a byte
+//     06h/04h stored to 0x03000000; a word (20h<<24 | addr) stored to 0x03000000 (sector erase);
+//     a word (02h<<24 | addr) stored to 0x03800000, then the data bytes to 0x03800000 and the
+//     last byte to 0x03000000 (page program). The opcode is literally the top byte of the stored
+//     word: 0x0002bca4 dispatches on top byte == 0x20 / == 0x02. "Status" on this path is not
+//     05h: 0x0002bc78 re-reads the boot header word at 0x03000000 through XIP and compares it with
+//     the DH_FLAG magic 0x0c646874. A twin of this driver sits in the flash-resident YMODEM
+//     upgrade bootloader (0x03003d30-0x03004010).
+//  2. Raw SSI at 0x04000000 (entry 4 of the SSI base table at 0x030ada00, outside the
+//     datasheet memory map). Only 0x0002bb98 uses it, for the quad-enable sequence 35h / 06h /
+//     01h 00h 02h / 05h, followed by QUAD_ENABLE = 1 in SystemControl (0x1100005c, the LCSFC
+//     quad-mode switch). Attributing this controller to the program flash rests on that
+//     QUAD_ENABLE write and on its chip select being the controller's own SER bit 0 rather than
+//     the data chip's GPIOA 0x12.
+// Opcodes never sent by any path: 52h, D8h, C7h, 60h, 44h, 42h, 48h, 9Fh, 90h, ABh, B9h, 50h,
+// 4Bh. Method: linear sweep of the IRAM image and program flash for stores into
+// 0x03000000/0x03800000 (address formed as 0xc0<<18, 0xe0<<18 or 0xc0xx<<10), for calls to
+// 0x0002bca4/0x03003d5c, and for uses of the 0x04000000 controller; no function-pointer literal
+// to any of these routines exists.
+
+`include "dm32_udp.rdl"
+
+addrmap gd25q80 {
+    name = "GD25Q80 program flash";
+    desc = "1 MB SPI NOR flash behind the HR_C7000 LCSFC, mapped for execute-in-place at 0x03000000 (flash offset = address - 0x03000000). Layout seen in the stock image: 0x000000 DH_FLAG boot header (0x0c646874, load address 0x03001000, check word 0x0f647874) in a sector that is otherwise mostly zeros; 0x001000 boot entry, whose code includes the YMODEM upgrade loader (0x03004618) and a jump to the application at 0x0300c000 (0x030017fc); 0x00b000 one 4 KB per-unit settings sector, rewritten by the firmware; 0x00c000-0x0fffff application (the range the upgrade loader erases). Never erase 0x000000-0x00bfff without a verified full backup of the same radio.";
+    ds_ref = "GD25Q80C Rev 1.0";
+    confidence = "STRUCTURAL";
+
+    default regwidth = 8;
+
+    // ---------------------------------------------------------------- status register
+    addrmap {
+        name = "Status register";
+        desc = "One 16-bit register S15-S0, read as two bytes: 05h returns S7-S0, 35h returns S15-S8. Written only by 01h with one byte (S7-S0; CS rising after 8 bits CLEARS CMP and QE) or two bytes (S7-S0, S15-S8). No 31h on this part. 50h before 01h writes volatile copies. Reserved bits S11-S12 omitted. The datasheet labels opcode 35h 'Read Status Register-1'; this file calls the bytes SR1 (S7-S0) and SR2 (S15-S8) to match the W25Q128JV description.";
+        ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.10-11; 7.3-7.5, PDF p.16-17";
+        confidence = "DATASHEET";
+
+        reg {
+            name = "Status Register S7-S0";
+            desc = "Read with 05h (wire_addr), written with wr_cmd. Delivered as 0x00.";
+            wr_cmd = "01h (first data byte), after 06h (non-volatile) or 50h (volatile)";
+            wire_addr = 0x05;
+            confidence = "STRUCTURAL";
+            ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.10; initial delivery state 8.2, PDF p.41";
+            fw_reads = "0x0002bb98 (raw SSI 0x04000000): after the 01h write, polls 05h (sent at 0x0002bc0e) until the whole byte reads 0x00.";
+            fw_writes = "0x0002bb98: 01h at 0x0002bbe8, first data byte 0x00 (0x0002bbf0), only when 35h showed QE = 0.";
+
+            field { name = "WIP"; desc = "Write in progress. Status only.";
+                    sw = r; hw = w; confidence = "STRUCTURAL";
+                    ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.10";
+                    fw_reads = "0x0002bb98 waits for the whole byte to be 0, which includes WIP. The LCSFC path never reads it (see file header)."; nonvolatile = false; } WIP[0:0] = 0;
+            field { name = "WEL"; desc = "Write enable latch. Status only.";
+                    sw = r; hw = w; confidence = "DATASHEET";
+                    ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.10"; nonvolatile = false; } WEL[1:1] = 0;
+            field { name = "BP"; desc = "Block protect BP4:BP0 (S6:S2), non-volatile; with CMP selects the protected area (Table 1.0/1.1). Chip erase runs only when BP2:BP0 = 0 and CMP = 0.";
+                    sw = rw; hw = na; confidence = "STRUCTURAL";
+                    ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.10; Table 1.0-1.1, PDF p.8-9";
+                    fw_writes = "0x0002bb98 writes 0 (via the 0x00 first byte of 01h) when it sets QE."; nonvolatile = true; } BP[6:2] = 0;
+            field { name = "SRP0"; desc = "Status register protect 0 (with SRP1 and WP#: software / hardware / power-supply lock-down / OTP). Non-volatile.";
+                    sw = rw; hw = na; confidence = "STRUCTURAL";
+                    ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.10";
+                    fw_writes = "0x0002bb98 writes 0 when it sets QE."; nonvolatile = true; } SRP0[7:7] = 0;
+        } SR1 @ 0x0;
+
+        reg {
+            name = "Status Register S15-S8";
+            desc = "Read with 35h (wire_addr), written with wr_cmd. Delivered as 0x00.";
+            wr_cmd = "01h (second data byte; a one-byte 01h clears CMP and QE), after 06h or 50h. No 31h on this part";
+            wire_addr = 0x35;
+            confidence = "STRUCTURAL";
+            ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.10-11; initial delivery state 8.2, PDF p.41";
+            fw_reads = "0x0002bb98 (raw SSI 0x04000000): 35h at 0x0002bbb0, reads one byte, tests bit 1 (QE, andi 2 at 0x0002bbc2).";
+            fw_writes = "0x0002bb98: second data byte of 01h = 0x02 (0x0002bbf8), i.e. QE = 1 and SRP1 = LB = HPF = CMP = SUS = 0.";
+
+            field { name = "SRP1"; desc = "Status register protect 1. Non-volatile.";
+                    sw = rw; hw = na; confidence = "STRUCTURAL";
+                    ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.10";
+                    fw_writes = "0x0002bb98 writes 0 when it sets QE."; nonvolatile = true; } SRP1[0:0] = 0;
+            field { name = "QE"; desc = "Quad enable. Non-volatile; default 0. Must be 1 for the LCSFC's quad XIP (SystemControl QUAD_ENABLE).";
+                    sw = rw; hw = na; confidence = "STRUCTURAL";
+                    ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.11";
+                    fw_reads = "0x0002bb98 reads it with 35h (bit 1).";
+                    fw_writes = "0x0002bb98 sets it to 1 (01h 00h 02h) when found 0, then writes 0x01000001 to SystemControl QUAD_ENABLE 0x1100005c. Reached from 0x0002e158, called from 0x0300c074."; nonvolatile = true; } QE[1:1] = 0;
+            field { name = "LB"; desc = "Security register lock (OTP: once 1, the security registers are read-only forever). Default 0.";
+                    sw = rw; hw = na; onwrite = woset; confidence = "DATASHEET";
+                    ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.11"; nonvolatile = true; } LB[2:2] = 0;
+            field { name = "HPF"; desc = "High performance flag (set while in A3h high-performance mode). Status only. Labelled HPM in the bit figure, HPF in the text.";
+                    sw = r; hw = w; confidence = "DATASHEET";
+                    ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.10-11"; nonvolatile = false; } HPF[5:5] = 0;
+            field { name = "CMP"; desc = "Complement protect, with BP4:BP0. Non-volatile; default 0. Cleared by a one-byte 01h.";
+                    sw = rw; hw = na; confidence = "DATASHEET";
+                    ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.11; 7.4, PDF p.16"; nonvolatile = true; } CMP[6:6] = 0;
+            field { name = "SUS"; desc = "Program/erase suspended (75h sets, 7Ah or power cycle clears). Status only.";
+                    sw = r; hw = w; confidence = "DATASHEET";
+                    ds_ref = "GD25Q80C Rev 1.0, 6, PDF p.11"; nonvolatile = false; } SUS[7:7] = 0;
+        } SR2 @ 0x1;
+    } status @ 0x000;
+
+    // ---------------------------------------------------------------- identification
+    addrmap {
+        name = "Identification";
+        desc = "The datasheet's feature list also promises a 128-bit unique ID and four 256-byte security registers (44h/42h/48h, A15-A8 = 00h-03h), but documents no opcode for reading the unique ID; neither is described here.";
+        ds_ref = "GD25Q80C Rev 1.0, 1, PDF p.4; Table of ID Definitions, PDF p.14";
+        confidence = "DATASHEET";
+
+        reg {
+            name = "JEDEC ID";
+            desc = "Returned by 9Fh, manufacturer first. Not read on a radio; the stock firmware never sends 9Fh to this chip.";
+            regwidth = 32;
+            wire_addr = 0x9F;
+            confidence = "DATASHEET";
+            ds_ref = "GD25Q80C Rev 1.0, Table of ID Definitions, PDF p.14; 7.23, PDF p.30";
+            field { name = "MF"; desc = "Manufacturer ID (GigaDevice = C8h)."; sw = r; hw = na;
+                    confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, PDF p.14"; } MF[23:16] = 0xC8;
+            field { name = "MEMORY_TYPE"; desc = "Memory type ID15-ID8 (40h)."; sw = r; hw = na;
+                    confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, PDF p.14"; } MEMORY_TYPE[15:8] = 0x40;
+            field { name = "CAPACITY"; desc = "Capacity ID7-ID0 (14h = 8 Mbit)."; sw = r; hw = na;
+                    confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, PDF p.14"; } CAPACITY[7:0] = 0x14;
+        } JEDEC_ID @ 0x0;
+    } id @ 0x010;
+
+    // ---------------------------------------------------------------- instruction set
+    field opcode_f {
+        name = "Opcode"; desc = "Command byte, shifted in MSB first after CS# falls.";
+        sw = r; hw = na;
+        confidence = "DATASHEET";
+        ds_ref = "GD25Q80C Rev 1.0, Table 2 (Commands), PDF p.12-13";
+    };
+    field opcode_fw_f {
+        name = "Opcode"; desc = "Command byte, shifted in MSB first after CS# falls. The stock firmware forms this value (as a stored byte or the top byte of a stored word on the LCSFC path, or as an SSI data byte); see the register's fw_writes.";
+        sw = r; hw = na;
+        confidence = "STRUCTURAL";
+        ds_ref = "GD25Q80C Rev 1.0, Table 2 (Commands), PDF p.12-13";
+        fw_writes = "See the enclosing register's fw_writes.";
+    };
+
+    addrmap {
+        name = "Instruction set";
+        desc = "One pseudo-register per opcode at offset = opcode. A = 3 address bytes. Program, erase and status-write commands need a preceding 06h and must end on a byte boundary.";
+        ds_ref = "GD25Q80C Rev 1.0, 7, PDF p.12-14";
+        confidence = "DATASHEET";
+
+        reg { name = "Write Enable (WREN)"; desc = "Frame: 06h. Sets WEL.";
+              confidence = "STRUCTURAL"; ds_ref = "GD25Q80C Rev 1.0, 7.1, PDF p.15";
+              fw_writes = "LCSFC path: byte 0x06 stored to 0x03000000 at 0x0002bcb2 (0x0002bca4, mode 1), called before every erase (0x0002be2c in 0x0002bde8) and program (0x0002bf12 in 0x0002beb8); also at 0x0002bd48 and 0x0002bd58 in the boot-header repair 0x0002bd20. Bootloader twins: 0x03003d6a (0x03003d5c), 0x03003df8 and 0x03003e08 (flash_controller_descriptor_init_once 0x03003dd0). Raw SSI: 0x0002bbd4 in 0x0002bb98.";
+              opcode_fw_f opcode[7:0] = 0x06; } WRITE_ENABLE @ 0x06;
+        reg { name = "Write Disable (WRDI)"; desc = "Frame: 04h. Clears WEL.";
+              confidence = "STRUCTURAL"; ds_ref = "GD25Q80C Rev 1.0, 7.2, PDF p.15";
+              fw_writes = "LCSFC path: byte 0x04 stored to 0x03000000 unconditionally at the start of the boot-header check 0x0002bd20 (0x0002bd28; reached at every boot via 0x0002bf80 from radio_boot_full_init_sequence 0x0305f304), and in its bootloader twin 0x03003dd0 (0x03003dd8). 0x0002bca4 also has a 04h branch (0x0002bcc0) that no caller uses.";
+              opcode_fw_f opcode[7:0] = 0x04; } WRITE_DISABLE @ 0x04;
+        reg { name = "Write Enable for Volatile Status Register"; desc = "Frame: 50h.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.5, PDF p.17";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x50; } VOLATILE_SR_WRITE_ENABLE @ 0x50;
+        reg { name = "Read Status Register S7-S0"; desc = "Frame: 05h, then S7-S0 (continuous).";
+              confidence = "STRUCTURAL"; ds_ref = "GD25Q80C Rev 1.0, 7.3, PDF p.16";
+              fw_writes = "Raw SSI only: 0x0002bc0e in the poll loop of 0x0002bb98. Not used on the LCSFC path (0x0002bc78 / 0x03003d30 re-read the boot header through XIP instead).";
+              opcode_fw_f opcode[7:0] = 0x05; } READ_STATUS_LO @ 0x05;
+        reg { name = "Read Status Register S15-S8"; desc = "Frame: 35h, then S15-S8 (continuous). The datasheet calls this 'Read Status Register-1'.";
+              confidence = "STRUCTURAL"; ds_ref = "GD25Q80C Rev 1.0, 7.3, PDF p.16";
+              fw_writes = "Raw SSI only: 0x0002bbb0 in 0x0002bb98 (QE check).";
+              opcode_fw_f opcode[7:0] = 0x35; } READ_STATUS_HI @ 0x35;
+        reg { name = "Write Status Register (WRSR)"; desc = "Frame: 06h, then 01h S7-S0 [S15-S8]. A one-byte write clears CMP and QE. Can set the OTP LB bit and the SRP1:SRP0 = 11 OTP lock.";
+              confidence = "STRUCTURAL"; ds_ref = "GD25Q80C Rev 1.0, 7.4, PDF p.16";
+              fw_writes = "Raw SSI only: 0x0002bb98 sends 01h (0x0002bbe8) 00h (0x0002bbf0) 02h (0x0002bbf8) after 06h, only when 35h shows QE = 0. The only status-register write in the stock firmware, to either flash chip.";
+              destructive = true;
+              opcode_fw_f opcode[7:0] = 0x01; } WRITE_STATUS @ 0x01;
+
+        reg { name = "Read Data"; desc = "Frame: 03h A, then data (continuous).";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.6, PDF p.17";
+              fw_writes = "Not sent by firmware code; reads go through LCSFC execute-in-place (which read opcode the LCSFC uses is not documented).";
+              opcode_f opcode[7:0] = 0x03; } READ_DATA @ 0x03;
+        reg { name = "Fast Read"; desc = "Frame: 0Bh A dummy, then data.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.7, PDF p.18";
+              fw_writes = "Not sent by firmware code.";
+              opcode_f opcode[7:0] = 0x0B; } FAST_READ @ 0x0B;
+        reg { name = "Dual Output Fast Read"; desc = "Frame: 3Bh A dummy, then data on IO0/IO1.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.8, PDF p.18";
+              fw_writes = "Not sent by firmware code.";
+              opcode_f opcode[7:0] = 0x3B; } DUAL_OUTPUT_FAST_READ @ 0x3B;
+        reg { name = "Quad Output Fast Read"; desc = "Frame: 6Bh A dummy, then data on IO0-IO3 (QE = 1).";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.9, PDF p.19";
+              fw_writes = "Not sent by firmware code.";
+              opcode_f opcode[7:0] = 0x6B; } QUAD_OUTPUT_FAST_READ @ 0x6B;
+        reg { name = "Dual I/O Fast Read"; desc = "Frame: BBh, address and M7-M0 on IO0/IO1, then data.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.10, PDF p.19";
+              fw_writes = "Not sent by firmware code.";
+              opcode_f opcode[7:0] = 0xBB; } DUAL_IO_FAST_READ @ 0xBB;
+        reg { name = "Quad I/O Fast Read"; desc = "Frame: EBh, address and M7-M0 on IO0-IO3, dummy, then data.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.11, PDF p.21";
+              fw_writes = "Not sent by firmware code.";
+              opcode_f opcode[7:0] = 0xEB; } QUAD_IO_FAST_READ @ 0xEB;
+        reg { name = "Quad I/O Word Fast Read"; desc = "Frame: E7h (address bit 0 must be 0).";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.12, PDF p.22";
+              fw_writes = "Not sent by firmware code.";
+              opcode_f opcode[7:0] = 0xE7; } QUAD_IO_WORD_FAST_READ @ 0xE7;
+        reg { name = "Continuous Read Mode Reset"; desc = "Frame: FFh.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.25, PDF p.32";
+              fw_writes = "Not sent by firmware code.";
+              opcode_f opcode[7:0] = 0xFF; } CONTINUOUS_READ_MODE_RESET @ 0xFF;
+        reg { name = "Set Burst with Wrap"; desc = "Frame: 77h W6-W4.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.13, PDF p.23";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x77; } SET_BURST_WITH_WRAP @ 0x77;
+
+        reg { name = "Page Program (PP)"; desc = "Frame: 06h, then 02h A D1..D256 within one 256-byte page.";
+              confidence = "STRUCTURAL"; ds_ref = "GD25Q80C Rev 1.0, 7.14, PDF p.24";
+              fw_writes = "LCSFC path, issued only by 0x0002bca4 (word (02h<<24|addr) to 0x03800000 at 0x0002bce4, data to 0x03800000, last byte to 0x03000000 at 0x0002bd12), built in 0x0002beb8 (bseti 25 at 0x0002bf1e, preceded by 06h). Callers of 0x0002beb8: flash_cache_sector_modify_and_writeback 0x0301ca44 (0x0301cab4, rewrites the 4 KB settings sector 0x00b000, retrying until it succeeds); FUN_0002c0f8 (0x0002c148, restores 4 bytes at 0x00b10c) and FUN_0002c160 (0x0002c19a, 0x00b000 + offset), both called from the CPS loops serial_protocol_vframe_command_loop 0x0302a044 (0x0302a17c/0x0302a186) and its variant 0x0302a4dc (0x0302a690/0x0302a69a). Direct stores (not via 0x0002bca4): the boot-header repair 0x0002bd20 programs the 12-byte header at 0x000000 (0x0002bd62-0x0002bd74) when the header check fails. Bootloader twins: flash_region_write_chunked 0x03003f60 via 0x03003d5c (0x03003d9c), called by 0x0300407c (renamed 2026-10-11 from locked_integer_increment_with_fail_flag to ymodem_flash_block_program; it programs a received YMODEM block) from xmodem_ymodem_block_receive_loop 0x03004618 (0x030047e0); header programming in 0x03003dd0 (0x03003e12).";
+              destructive = true;
+              opcode_fw_f opcode[7:0] = 0x02; } PAGE_PROGRAM @ 0x02;
+        reg { name = "Quad Page Program"; desc = "Frame: 06h, then 32h A, data on IO0-IO3.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.15, PDF p.25";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x32; } QUAD_PAGE_PROGRAM @ 0x32;
+
+        reg { name = "Sector Erase (SE)"; desc = "Frame: 06h, then 20h A. Erases one 4 KB sector.";
+              confidence = "STRUCTURAL"; ds_ref = "GD25Q80C Rev 1.0, 7.16, PDF p.26";
+              fw_writes = "LCSFC path, issued by 0x0002bca4 (word (20h<<24|addr) to 0x03000000 at 0x0002bcd4), built per 4 KB sector in 0x0002bde8 (bseti 29 at 0x0002be0e; 06h first). Callers of 0x0002bde8: flash_cache_sector_modify_and_writeback 0x0301ca44 (0x0301ca92, sector 0x00b000; spins forever at 0x0301ca9a if the erase reports failure) and FUN_0002c0f8 (0x0002c11e, sector 0x00b000; CPS path from 0x0302a17c and 0x0302a690). Direct store 0x20000000 (sector 0x000000, the boot header) at 0x0002bd4e in 0x0002bd20, executed at every boot (0x0002bf80 <- radio_boot_full_init_sequence 0x0305f304) but only when the header word is not 0x0c646874 or word 2 != word 1 + 0x0c646874. Bootloader twins: flash_sector_erase_range_4kb 0x03003e9c via 0x03003d5c (0x03003d8c), called by FUN_03004040 (0x03004060) which erases every sector 0x00c000-0x0fffff (the whole application) from xmodem_ymodem_block_receive_loop (0x03004762); header-sector erase in flash_controller_descriptor_init_once 0x03003dd0 (0x03003dfe), whose only caller FUN_03004030 has no direct caller.";
+              destructive = true;
+              opcode_fw_f opcode[7:0] = 0x20; } SECTOR_ERASE @ 0x20;
+        reg { name = "Block Erase 32 KB"; desc = "Frame: 06h, then 52h A.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.17, PDF p.26";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x52; } BLOCK_ERASE_32K @ 0x52;
+        reg { name = "Block Erase 64 KB"; desc = "Frame: 06h, then D8h A.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.18, PDF p.27";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0xD8; } BLOCK_ERASE_64K @ 0xD8;
+        reg { name = "Chip Erase (60h)"; desc = "Frame: 06h, then 60h. Runs only if BP2:BP0 = 0 and CMP = 0.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.19, PDF p.27";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x60; } CHIP_ERASE_60 @ 0x60;
+        reg { name = "Chip Erase (C7h)"; desc = "Frame: 06h, then C7h. Same as 60h.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.19, PDF p.27";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0xC7; } CHIP_ERASE_C7 @ 0xC7;
+
+        reg { name = "Deep Power-Down"; desc = "Frame: B9h.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.20, PDF p.28";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0xB9; } DEEP_POWER_DOWN @ 0xB9;
+        reg { name = "Release from Deep Power-Down / Read Device ID"; desc = "Frame: ABh [dummy x3, then DID7-DID0 = 13h].";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.21, PDF p.29";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0xAB; } RELEASE_DEEP_POWER_DOWN_ID @ 0xAB;
+        reg { name = "Read Manufacturer / Device ID (REMS)"; desc = "Frame: 90h dummy dummy 00h, then C8h 13h.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.22, PDF p.30";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x90; } MANUFACTURER_DEVICE_ID @ 0x90;
+        reg { name = "Read Identification (RDID)"; desc = "Frame: 9Fh, then C8h 40h 14h. See id.JEDEC_ID.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.23, PDF p.30";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x9F; } READ_IDENTIFICATION @ 0x9F;
+        reg { name = "High Performance Mode (HPM)"; desc = "Frame: A3h dummy dummy dummy.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.24, PDF p.31";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0xA3; } HIGH_PERFORMANCE_MODE @ 0xA3;
+        reg { name = "Program/Erase Suspend (PES)"; desc = "Frame: 75h.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.26, PDF p.32";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x75; } PROGRAM_ERASE_SUSPEND @ 0x75;
+        reg { name = "Program/Erase Resume (PER)"; desc = "Frame: 7Ah.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.27, PDF p.33";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x7A; } PROGRAM_ERASE_RESUME @ 0x7A;
+        reg { name = "Erase Security Registers"; desc = "Frame: 06h, then 44h A (A15-A8 = 00h-03h selects register 0-3). Ignored once LB = 1.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.28, PDF p.33; Table 2 note 8, PDF p.14";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x44; } ERASE_SECURITY_REGISTERS @ 0x44;
+        reg { name = "Program Security Registers"; desc = "Frame: 06h, then 42h A D...";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.29, PDF p.34";
+              fw_writes = "Never sent by stock firmware.";
+              destructive = true;
+              opcode_f opcode[7:0] = 0x42; } PROGRAM_SECURITY_REGISTERS @ 0x42;
+        reg { name = "Read Security Registers"; desc = "Frame: 48h A dummy, then data.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.30, PDF p.34";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x48; } READ_SECURITY_REGISTERS @ 0x48;
+        reg { name = "Enable Reset"; desc = "Frame: 66h; must precede 99h.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.31, PDF p.35";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x66; } ENABLE_RESET @ 0x66;
+        reg { name = "Reset"; desc = "Frame: 99h (after 66h).";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, 7.31, PDF p.35";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x99; } RESET @ 0x99;
+        reg { name = "Read Serial Flash Discoverable Parameter"; desc = "Frame: 5Ah A dummy, then data.";
+              confidence = "DATASHEET"; ds_ref = "GD25Q80C Rev 1.0, Read SFDP (5AH), PDF p.35-36";
+              fw_writes = "Never sent by stock firmware.";
+              opcode_f opcode[7:0] = 0x5A; } READ_SFDP @ 0x5A;
+    } cmd @ 0x100;
+};

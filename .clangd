@@ -1,0 +1,4 @@
+CompileFlags:
+  # tools/src/dm32_patch_tools/gen_compile_commands.py (make -C tools compile-commands) writes
+  # the database to out/, which is gitignored because it holds absolute paths.
+  CompilationDatabase: out

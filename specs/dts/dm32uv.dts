@@ -1,0 +1,560 @@
+/dts-v1/;
+/*
+ * dm32uv.dts - Baofeng DM-32UV board description: which chip sits on which bus and pin.
+ *
+ * Hand-maintained. Describes hardware, not a Linux port: the CK803S has no MMU and nothing here
+ * has been booted. Every node and pin cites its source; the tags are defined in hr_c7000.dtsi.
+ * Additional tags used here:
+ *   [MAP]  the community HR_C7000 GPIO pin map "PinMap_Baofeng_DM-32_14.06.26.xls" (infotex58.ru
+ *          forum, OpenDM32 thread topic 1168, post #67, by Koshak), one label per pin.
+ *   [ORTX] the OpenRTX DM-32 port's pinmap.h (OpenRTX contributors, GPL-3.0-or-later; nothing
+ *          copied, pin numbers compared only).
+ *   [MAN]  Baofeng DM-32UV User Manual (2025-02-10).
+ * Where they disagree, the stock firmware wins and the disagreement is recorded in README.md.
+ *
+ * Pin numbers: <&portX bit flags>. Stock firmware numbers pins bank*32 + bit (GPIOA 0x00-0x1f,
+ * GPIOB 0x20-0x3f, GPIOC 0x40-0x5f); each comment gives that number too. GPIO flags are written
+ * as numbers so this file needs no preprocessor: 0 = active high, 1 = active low,
+ * 6 = open drain (GPIO_SINGLE_ENDED | GPIO_LINE_OPEN_DRAIN). Linux input codes are numbers too,
+ * named in comments (include/uapi/linux/input-event-codes.h).
+ *
+ * Nothing here is per-unit data. The per-unit regions of both flash chips are named only to
+ * mark them read-only.
+ */
+
+/include/ "hr_c7000.dtsi"
+
+/ {
+	model = "Baofeng DM-32UV";
+	/* "baofeng" and "dahua" are not registered vendor prefixes (README.md). */
+	compatible = "baofeng,dm32uv", "dahua,hr-c7000";
+
+	aliases {
+		serial0 = &uart0;
+		serial1 = &uart1;
+	};
+
+	chosen {
+		/* UART0 is the CPS programming / console port, 115200 baud [FW uart0_init @0x0301da48,
+		 * called with 0xe1 << 9 at 0x0305f326]. */
+		stdout-path = "serial0:115200n8";
+	};
+
+	/* Placeholder supply for the bindings that require one. No board power rail has been
+	 * traced; the voltage is deliberately not stated. */
+	vcc_board: regulator-board {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc-board-untraced";
+		regulator-always-on;
+	};
+
+	/* Battery: 7.4 V nominal, 2500 mAh, Li-ion [MAN, specifications]. Two cells in series
+	 * [ORTX hwconfig.h]. Design voltage limits are not stated here: none is documented. */
+	battery: battery {
+		compatible = "simple-battery";
+		device-chemistry = "lithium-ion";
+		charge-full-design-microamp-hours = <2500000>;
+	};
+
+	/* Battery voltage sense: ADC channel 2 (ADC2_IN, pad GPIOC 17).
+	 * [FW battery_percentage_display_update @0x0301ba58 calls adc_read_channel_dispatch(2);
+	 * adc_stop_and_reset @0x0301caec muxes ADC2_IN; QEMU hw/misc/dm32_adc.c note 2026-10-09].
+	 * The divider ratio (raw count -> volts) is NOT established. Channel 1 (ADC1_IN, GPIOC 16)
+	 * is also muxed and read (analog_digital_channel_tracking_sync @0x03061d86); its signal is
+	 * not identified, so it is not given a consumer. */
+	vbat-sense {
+		compatible = "iio-hwmon";
+		io-channels = <&adc 2>;
+	};
+
+	/* PTT and the power switch: dedicated GPIO inputs. Upstream "gpio-keys". */
+	keys {
+		compatible = "gpio-keys";
+
+		/* PTT: GPIOB 11 (0x2b), active low. Configured as a both-edge interrupt input
+		 * (gpio_pin_configure(0x2b, 1, 2) in board_gpio_init @0x03001600) and read at boot:
+		 * PTT and SK1 both low enter the serial upgrade console [FW 0x030017d0, QEMU
+		 * hw/gpio/dm32_gpio.c; MAN: "hold PTT+SK1 to open the radio" for upgrade]. [MAP "PTT
+		 * Key"; ORTX PTT_SW]. Linux has no PTT key code; BTN_0 (0x100) stands in. */
+		key-ptt {
+			label = "PTT";
+			gpios = <&portb 11 1>;
+			linux,code = <0x100>;	/* BTN_0 */
+		};
+
+		/* Power/volume-knob switch sense: GPIOA 16 (0x10), reads HIGH when switched off.
+		 * Stock's watcher posts the power-off flag when it reads nonzero, and it is set up as
+		 * a both-edge interrupt input with gpio(0x11) = 1 in FUN_0301b818 [FW; QEMU
+		 * dm32_gpio.c "idle-low" note]. [MAP "Power check OFF"]. */
+		switch-power {
+			label = "Power switch";
+			gpios = <&porta 16 0>;
+			linux,code = <116>;	/* KEY_POWER */
+		};
+	};
+
+	/* SK1 / SK2 side keys. They are NOT separate lines: they pull keypad ROW lines GPIOB 19
+	 * (0x33) and GPIOB 20 (0x34) low directly, with no driven column. Stock reads them with all
+	 * columns driven high before the matrix pass and returns scan codes 4 / 7
+	 * [FW keypad_scan_and_map_pressed_key @0x03013660; docs/keypad-input.md]. GPIOB 19 = SK1:
+	 * it is the second boot-mode pin with PTT (above) and the manual's upgrade combination is
+	 * PTT+SK1 [FW, MAN]. GPIOB 20 = SK2 by elimination [INF]. [MAP labels both only as
+	 * "Keyboard COL_3/COL_4".] Disabled because the same GPIOs are claimed as matrix rows below;
+	 * a driver must arbitrate (scan with all columns inactive first, as stock does). */
+	side-keys {
+		compatible = "gpio-keys";
+		status = "disabled";
+
+		key-sk1 {
+			label = "SK1";
+			gpios = <&portb 19 1>;
+			linux,code = <202>;	/* KEY_PROG3 */
+		};
+
+		key-sk2 {
+			label = "SK2";
+			gpios = <&portb 20 1>;
+			linux,code = <203>;	/* KEY_PROG4 */
+		};
+	};
+
+	/* Front keypad: 4 sensed rows x 5 driven columns. Upstream "gpio-matrix-keypad".
+	 *   rows (inputs):  GPIOB 17..20 (0x31..0x34), read together at EXT_PORTA bits [20:17];
+	 *   cols (outputs): GPIOC 7..11 (0x47..0x4b), driven low one at a time, others high.
+	 * [FW keypad_scan_and_map_pressed_key @0x03013660, gpio_portb_read_input_bits_17_to_20
+	 * @0x030135d8, keypad_scan_begin_mux_rows_drive_low @0x03012e14, key table at 0x03081f1c;
+	 * QEMU-measured codes in docs/keypad-input.md]. [MAP calls the GPIOC lines "ROW 0..4" and
+	 * the GPIOB lines "COL_1..4"; ORTX copies that naming.] DT naming follows the binding:
+	 * rows are the sensed lines.
+	 *
+	 * PINMUX CONSTRAINT: GPIOC 7..11 are the LCD data pads DB0..DB4. The columns only exist
+	 * while IO_DIPLEX2[15:9] hands them to GPIO (pinctrl "scan" = keypad_scan_pins), and the
+	 * LCD is dead until they are handed back (lcd_pins). Stock serialises the two with the
+	 * semaphore at 0x00039344 and restores the LCD after every scan (docs/keypad-input.md).
+	 * gpio-matrix-keypad cannot express this; a driver must switch states around each scan.
+	 * The "scan" state is therefore not the default.
+	 *
+	 * Keymap: MATRIX_KEY(row, col, code) = row << 24 | col << 16 | code. Stock scan codes in
+	 * the comments. Column 4 rows 2-3 have no key (table byte 0x65). GPIOC 12 is scanned by the
+	 * stock loop but has no key and is never muxed to GPIO. */
+	keypad {
+		compatible = "gpio-matrix-keypad";
+		row-gpios = <&portb 17 1>, <&portb 18 1>, <&portb 19 1>, <&portb 20 1>;
+		col-gpios = <&portc 7 1>, <&portc 8 1>, <&portc 9 1>, <&portc 10 1>,
+			    <&portc 11 1>;
+		drive-inactive-cols;	/* stock drives every idle column high [FW 0x030135e4] */
+		pinctrl-names = "scan";
+		pinctrl-0 = <&keypad_scan_pins>;
+		linux,keymap = <
+			0x00000160	/* r0 c0  Ok  (0x03; opens the menu from standby) KEY_OK */
+			0x01000004	/* r1 c0  '3' (0x12) KEY_3 */
+			0x02000003	/* r2 c0  '2' (0x11) KEY_2 */
+			0x03000002	/* r3 c0  '1' (0x10) KEY_1 */
+			0x00010094	/* r0 c1  P1  (0x09) KEY_PROG1 */
+			0x01010007	/* r1 c1  '6' (0x15) KEY_6 */
+			0x02010006	/* r2 c1  '5' (0x14) KEY_5 */
+			0x03010005	/* r3 c1  '4' (0x13) KEY_4 */
+			0x00020095	/* r0 c2  P2  (0x0c) KEY_PROG2 */
+			0x0102000a	/* r1 c2  '9' (0x18) KEY_9 */
+			0x02020009	/* r2 c2  '8' (0x17) KEY_8 */
+			0x03020008	/* r3 c2  '7' (0x16) KEY_7 */
+			0x0003009e	/* r0 c3  Back (0x06) KEY_BACK */
+			0x0103020b	/* r1 c3  '#' (0x0e) KEY_NUMERIC_POUND */
+			0x0203000b	/* r2 c3  '0' (0x0f) KEY_0 */
+			0x0303020a	/* r3 c3  '*' (0x0d) KEY_NUMERIC_STAR */
+			0x00040067	/* r0 c4  Up   (0x02) KEY_UP */
+			0x0104006c	/* r1 c4  Down (0x05) KEY_DOWN */
+		>;
+	};
+
+	/* Channel knob: rotary encoder on GPIOB 7 (A, 0x27) and GPIOB 6 (B, 0x26) [MAP "Encoder
+	 * rotary A/B"; ORTX ROT_A/ROT_B]. Both are interrupt inputs read at init and re-armed with
+	 * the opposite polarity (FUN_0301d27c, gpio_read_input_bit, gpio_interrupt_enable_bit_
+	 * with_polarity in FUN_0301d50c) [FW]. Steps per detent not established. */
+	encoder {
+		compatible = "rotary-encoder";
+		gpios = <&portb 7 0>, <&portb 6 0>;
+		rotary-encoder,relative-axis;
+		linux,axis = <0x08>;	/* REL_WHEEL */
+	};
+
+	/* Status LED (bicolour) and keypad backlight. Upstream "gpio-leds".
+	 * Polarity: active high [INF from FW]: every path that SETS 0x20/0x21 is gated on the
+	 * settings bit block04[0x32] & 4 being clear (tx_led_or_tone_off_conditional @0x03060a14,
+	 * _variant @0x030609ec), i.e. set = lit unless LEDs are turned off; board init drives both
+	 * low. Colours from [MAP] only. */
+	leds {
+		compatible = "gpio-leds";
+
+		led-red {
+			label = "red";
+			gpios = <&portb 0 0>;	/* 0x20 [MAP "Red LED"; ORTX LED_RED; FW] */
+			default-state = "off";
+		};
+
+		led-green {
+			label = "green";
+			gpios = <&portb 1 0>;	/* 0x21 [MAP "Green LED"; ORTX LED_GREEN; FW] */
+			default-state = "off";
+		};
+
+		/* GPIOB 8 (0x28) [MAP "Keyboard BackLight"; ORTX KB_BKLIGHT]. UNVERIFIED: no stock
+		 * access with 0x28 as a constant pin was found (sweep of every call to the GPIO
+		 * helpers). Polarity unknown. */
+		led-keypad {
+			label = "keypad-backlight";
+			gpios = <&portb 8 0>;
+			default-state = "off";
+			status = "disabled";
+		};
+	};
+
+	/* LCD backlight: PWM channel 0 on GPIOA 15 (PWM_0 pad), 1 kHz. Stock: pwm(ch 0,
+	 * 1000 Hz, duty (level+1) * 0x594 / 10000, level 0..6) [FW config_param_cap_and_dispatch
+	 * @0x0301c294 -> IRAM 0x0002bb18 -> 0x0301c1bc; pad mux FUN_0301c1a4]. [MAP "LCD
+	 * BackLight" on 0x0f; ORTX LCD_BKLIGHT 0x0f as a GPIO.] Upstream "pwm-backlight". Levels
+	 * are stock's seven duties in 1/10000; which is the default is a codeplug setting. */
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm 0 1000000 0>;
+		brightness-levels = <0 1428 2856 4284 5712 7140 8568 9996>;
+		default-brightness-level = <7>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pwm0_pins>;
+	};
+
+	/* Power hold: GPIOA 17 (0x11) is an OUTPUT held high to keep the radio on; the power-off
+	 * task drops it (upgrade_mode_enter_and_reset_task @0x0301b83c clears 0x11) [FW, QEMU].
+	 * [MAP labels it "Power key"; ORTX names it PWR_SW. Firmware wins: it is driven, not
+	 * read.] Upstream "gpio-poweroff": asserting (driving low) powers off. */
+	poweroff {
+		compatible = "gpio-poweroff";
+		gpios = <&porta 17 1>;
+	};
+
+	/* Speaker amplifier (TDA2822M, per the board photo noted in README.md) switched by
+	 * GPIOB 21 (0x35), active high [FW audio_pa_enable_gate @0x0301d6cc sets/clears 0x35, 35
+	 * callers; FUN_0301d6c0 clears it at boot]. [MAP "Audio PA control"; ORTX AUDIO_PA.] The
+	 * the former corpus name "tx_enable_gate" was wrong: it is the audio PA. The TDA2822 has no enable pin,
+	 * so the line presumably switches its supply [INF]. Upstream "simple-audio-amplifier". */
+	speaker-amplifier {
+		compatible = "simple-audio-amplifier";
+		enable-gpios = <&portb 21 0>;
+		VCC-supply = <&vcc_board>;
+		sound-name-prefix = "Speaker Amp";
+	};
+
+	/* Audio routing switches, upstream "gpio-mux". Both move together in the channel path;
+	 * board init clears both (FUN_0301d50c). Polarity: channel_change_apply_dispatcher
+	 * @0x030573e8 sets both for channel-mode nibble 0 and clears both otherwise, and
+	 * dmr_channel_scramble_seed_load @0x0305ca48 shows nibble 0x10 is DMR, so SET = analog
+	 * [FW, as traced for the OpenRTX port; ORTX AUDIO_MUX_MIC/AUDIO_MUX_DEST]. */
+	mic_mux: mux-controller-0 {
+		compatible = "gpio-mux";
+		#mux-control-cells = <0>;
+		/* GPIOB 14 (0x2e): 1 = analog FM, 0 = DMR [MAP "Audio path MIC Analog/DMR"] */
+		mux-gpios = <&portb 14 0>;
+		idle-state = <0>;
+	};
+
+	audio_dest_mux: mux-controller-1 {
+		compatible = "gpio-mux";
+		#mux-control-cells = <0>;
+		/* GPIOB 15 (0x2f): 1 = FD6818, 0 = PWM [MAP "Switch audio PWM/FD6818"] */
+		mux-gpios = <&portb 15 0>;
+		idle-state = <0>;
+	};
+
+	/* RF front-end band switches. No upstream binding; local compatible. All active high.
+	 *   PA:  enable with radio-mode flags byte 3 bit 4 set (UHF) -> clear 0x37, set 0x23;
+	 *        otherwise clear 0x23, set 0x37; disable clears both [FW IRAM pa_band_select_vhf_
+	 *        uhf_gpio @0x0002c838].
+	 *   LNA: flag bit 3 set -> clear 0x22, set 0x24; otherwise clear 0x24, set 0x22; off clears
+	 *        both [FW IRAM antenna_switch_select_gpio_24_22 @0x0002c878].
+	 * [MAP names all four; ORTX has only the two LNA lines.] There is no GPIO RF transmit
+	 * gate: TX is switched inside the FD6818 [ORTX RF audit]. */
+	rf-frontend {
+		compatible = "dm32uv,rf-frontend";
+		vhf-lna-gpios = <&portb 2 0>;	/* 0x22 [MAP "LNA VHF Control"] */
+		uhf-lna-gpios = <&portb 4 0>;	/* 0x24 [MAP "LNA UHF Control"] */
+		uhf-pa-gpios = <&portb 3 0>;	/* 0x23 [MAP "UHF PA Control"] */
+		vhf-pa-gpios = <&portb 23 0>;	/* 0x37 [MAP "VHF PA Control"] */
+		pinctrl-names = "default";
+		pinctrl-0 = <&rf_gpio_pins>;
+	};
+
+	/* FD6818B RF transceiver on a bit-banged 3-wire bus: CLK GPIOA 7 (0x07), bidirectional
+	 * DATA GPIOA 8 (0x08), CS GPIOA 24 (0x18) active low [FW IRAM fd6818b_reg_read
+	 * @0x0002c33c: clears 7 and 0x18, sends R/W + 7-bit address, then the bit loop @0x0002c298
+	 * turns DATA around (DDR bit 8) and samples EXT_PORTA bit 8 while CLK is high; CS idles
+	 * high from FUN_0301cc18]. Frame: R/W (1) | ADDR[6:0] | DATA[15:0], MSB first (FD6818
+	 * Programming Guide rev 1.0.0, interface timing p.15). Pads 7/8 are the I2C1 pads left on
+	 * GPIO. [MAP; ORTX FD6818_CLK/DAT/CS; QEMU dm32_fd6818.c: all agree.] Upstream "spi-gpio"
+	 * with the device in 3-wire mode; bus speed not stated by any source. */
+	spi_fd6818: spi-0 {
+		compatible = "spi-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		sck-gpios = <&porta 7 0>;
+		mosi-gpios = <&porta 8 0>;
+		cs-gpios = <&porta 24 1>;
+		num-chipselects = <1>;
+
+		/* Chip ID reads 0x4819 on hardware, not the datasheet's 0x6818 [HW, QEMU
+		 * dm32_fd6818.c]. Its GPIO0/GPIO1 outputs go to GPIOB 27 (0x3b) / GPIOB 26 (0x3a)
+		 * [MAP]; stock disables the GPIOB 27 interrupt at modem init (gpio_interrupt_disable_
+		 * bit(0x3b) in hr_c7000_modem_core_clock_and_reset_init) [FW]. Vendor prefix unknown;
+		 * local compatible. */
+		transceiver@0 {
+			compatible = "dm32uv,fd6818b";
+			reg = <0>;
+			spi-3wire;
+		};
+	};
+
+	/* ALPU-MP anti-clone chip (Neowine) on a bit-banged I2C bus: SCL GPIOA 5, SDA GPIOA 6
+	 * [FW IRAM i2c_read_block_0x7a @0x000144fc: SCL = bit (2*idx + 5), SDA = bit (2*idx + 6),
+	 * bus index at 0x00033c54 is constant 0; pads muxed to GPIO at IRAM 0x000141c8]. The
+	 * I2C0 CONTROLLER on the same pads is never used [SVD]. [MAP "ALPU-MP I2C_SCL/SDA" on
+	 * 0x05/0x06 agrees; QEMU's docs place it on the I2C0 controller - firmware overrides.]
+	 * Upstream "i2c-gpio". Open drain per I2C; stock actually drives both levels. */
+	i2c_alpu: i2c-0 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		sda-gpios = <&porta 6 6>;
+		scl-gpios = <&porta 5 6>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c0_gpio_pins>;
+
+		/* 7-bit address 0x3d: stock sends 0x7a as the first byte on the wire (the 8-bit
+		 * write address) [FW alpu_challenge_response_auth @0x0001f5b0 -> 0x000144fc, which
+		 * shifts the byte out unchanged]. Challenge/response at register 0x30. ALPU-MP
+		 * datasheet v2.16: 2-wire slave, SOT-23-6. "neowine" is not a registered prefix. */
+		security@3d {
+			compatible = "neowine,alpu-mp";
+			reg = <0x3d>;
+		};
+	};
+
+	/* RDA5807M FM broadcast receiver on a bit-banged I2C bus: SDA GPIOA 25 (0x19), SCL GPIOA 26
+	 * (0x1a) [FW rda5807m_i2c_send_byte @0x03065548 shifts bytes MSB first on
+	 * 0x19 clocked by 0x1a; rda5807m_i2c_recv_byte @0x030655ac turns 0x19 around and
+	 * samples EXT_PORTA bit 25; rda5807m_i2c_stop @0x03065484 is the STOP
+	 * condition]. [MAP "SDIO/SCLK RDA5807M" agrees; ORTX has no entry.] These are the SPI1
+	 * SCLK/MOSI pads; see &spi1 in hr_c7000.dtsi for the (uncalled) conflicting use. */
+	i2c_fm: i2c-1 {
+		compatible = "i2c-gpio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		sda-gpios = <&porta 25 6>;
+		scl-gpios = <&porta 26 6>;
+
+		/* 7-bit 0x10: stock's first byte is 0x20 (peripheral_reset_step_bit0x20 @0x0306559c),
+		 * the RDA5807M sequential-access write address (RDA5807M datasheet v1.0, chip
+		 * address 0010000b). Upstream "rda,rda5807" (media/i2c/rda,rda5807.yaml). Stock writes
+		 * a 0x7a-byte register image at boot (FUN_0306565c). Input port and audio-output
+		 * options are not traced, so none of the rda,* flags is set. */
+		radio@10 {
+			compatible = "rda,rda5807";
+			reg = <0x10>;
+			power-supply = <&vcc_board>;
+		};
+	};
+};
+
+/* Program flash: GD25Q80 (8 Mbit, 1 MB) on the XIP controller, mapped at 0x03000000
+ * [GD25Q80 datasheet; board photo per README.md; image size 0x100000 in
+ * specs/ksy/dm32_firmware_image.ksy]. Partitions follow that .ksy. */
+&xip {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/* DH_FLAG 0x0c646874 + entry word; the boot ROM reads the first 8 bytes. */
+			partition@0 {
+				label = "dh-header";
+				reg = <0x000000 0x1000>;
+				read-only;
+			};
+
+			/* Entered by the boot ROM; holds board_gpio_init and the boot-mode check that
+			 * jumps to 0x0300c000. */
+			partition@1000 {
+				label = "entry";
+				reg = <0x001000 0xa000>;
+			};
+
+			/* PER-UNIT: hardware-binding record derived from the eFuse ID (+0x10c) and
+			 * per-unit hardware bytes. Different on every radio; never overwrite
+			 * (data/firmware/patching/occupied_regions.json). */
+			partition@b000 {
+				label = "unit-params";
+				reg = <0x00b000 0x1000>;
+				read-only;
+			};
+
+			/* Application: crt0 at 0x0300c000, SRAM data image at 0x72000, IRAM load image
+			 * 0xbfc20-0xdecb8, trailer to 0xe04c0. */
+			partition@c000 {
+				label = "application";
+				reg = <0x00c000 0xf4000>;
+			};
+		};
+	};
+};
+
+/* Data flash: Winbond W25Q128JV, 16 MB, JEDEC ef 40 18 (live RDID; QEMU dm32_ssi.c), on SPI0
+ * with a GPIO chip select on GPIOA 18 (0x12), active low [FW spi_m0_init_flash_cs_high
+ * @0x0301c94c; spi_flash_cmd_sector_erase_raw @0x0002b9b4 selects 0x12 before each transfer].
+ * [MAP "CS/Clock/MOSI/MISO 25Q128 SPI0" on 0x12/0x14/0x15/0x16; ORTX FLASH_CS 0x12; QEMU
+ * SUBSYSTEM-COVERAGE.md: all agree.] It holds the codeplug, the record store and the per-unit
+ * CALIBRATION page. No fixed partitions are given on purpose: the calibration page sits at a
+ * different address on every unit and must be found by its page tag
+ * (specs/ksy/dm32_calibration.ksy). Calibration is restore-only (specs/README.md). */
+&spi0 {
+	status = "okay";
+	cs-gpios = <&porta 18 1>;
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+	};
+};
+
+/* GPS (optional hardware). UART1 at 9600 baud, receive pad only [FW gps_uart1_init_9600
+ * @0x0301d96c], initialised only when option byte bit 2 is set (radio_boot_full_init_sequence
+ * 0x0305f310-0x0305f31e) [FW]. Stock queues CASIC configuration sentences ($PCAS03/00/05/04 at
+ * 0x03081e10-0x03081e4c, via uart_tx_chunked_mutex_send @0x0301d9d4) and parses $GPRMC
+ * (gps_nmea_gprmc_parser) [FW]. CASIC is the ATGM336H family's protocol, consistent with
+ * [MAP "TXD GPS ATGM336H" on GPIOA 9 = UART1_RXD]. Enable on units with the GPS option. */
+&uart1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart1_rx_pins>;
+
+	/* No upstream binding for this module; gnss-common properties used. Power: GPIOB 12
+	 * (0x2c), active low [INF from FW: the GPS on/off path clears 0x2c to enable and sets it
+	 * while clearing the NMEA buffers (FUN_030116cc, now gps_power_set; formerly misnamed backlight_power_toggle);
+	 * peripheral_gpio_and_buffer_init @0x03011588 does the same from a setting bit]. [MAP "GPS
+	 * power control".] */
+	gnss {
+		compatible = "dm32uv,atgm336h";
+		current-speed = <9600>;
+		enable-gpios = <&portb 12 1>;
+	};
+};
+
+/* LCD: 240x320 RGB565 panel on the i8080 bus. Its controller's init sequence (stock
+ * lcd_controller_power_on_init_sequence @0x03017d4c: 0x11, 0xb2 0c 0c 00 33 33, 0x35, 0x3a 05,
+ * 0xb7 56, 0xbb 17, 0xc0 2c, 0xc2 01, 0xc3 0b, 0xc6 ef, 0xd0 a4 a1, 0xd6 a1, 14-byte 0xe0/0xe1
+ * gamma, 0x21, 0x29) uses Sitronix ST7789V vendor commands, not Himax HX8353-E ones
+ * [FW; ORTX "ST7789-class"]. The SVD, the QEMU model and the RE notes call it HX8353E (the
+ * common DCS subset - CASET/RASET/RAMWR/MADCTL - cannot tell them apart). Upstream
+ * "sitronix,st7789v" and "panel-mipi-dbi-spi" are SPI-attached panels, so neither fits an
+ * 8080-bus panel: local compatible. 240x320 from stock's CASET 0..239 / RASET 0..319 [QEMU,
+ * ORTX]. Reset: GPIOC 2 (0x42), pulsed low for 120 ms [FW]. RD (GPIOC 6) is a GPIO parked
+ * high [FW]. MADCTL is 0x00 or 0xc0 (180 deg) from a setting, so no rotation is fixed. */
+&lcdc {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&lcd_pins>;
+
+	panel@0 {
+		compatible = "dm32uv,lcd-panel";
+		reg = <0>;
+		reset-gpios = <&portc 2 1>;
+		backlight = <&backlight>;
+
+		/* Command-mode panel: only the active size is meaningful (convention of
+		 * panel-mipi-dbi-spi). */
+		panel-timing {
+			hactive = <240>;
+			vactive = <320>;
+			hback-porch = <0>;
+			vback-porch = <0>;
+			clock-frequency = <0>;
+			hfront-porch = <0>;
+			hsync-len = <0>;
+			vfront-porch = <0>;
+			vsync-len = <0>;
+		};
+	};
+};
+
+&pwm {
+	status = "okay";
+};
+
+&adc {
+	status = "okay";
+};
+
+/* DAC: enabled by stock at boot (FUN_0301cc30); consumer not traced. */
+&dac {
+	status = "okay";
+};
+
+/* Built-in vocoder and modem. There is NO external HR_V3000 vocoder on the DM-32UV: the radio
+ * uses the HR_C7000's built-in vocoder (DS 7.1.1 p.473), and no HR_V3000 frame templates or
+ * frame-building code exist in flash or IRAM [FW]. */
+&baseband {
+	status = "okay";
+};
+
+&codec {
+	status = "okay";
+};
+
+&timer0 {
+	status = "okay";
+};
+
+/* PLLA clock out on GPIOC 0, enabled by stock (clkout_pins); consumer not traced. */
+&pinmux {
+	pinctrl-names = "default";
+	pinctrl-0 = <&clkout_pins>;
+};
+
+/* Line names: every pin with a known function. "" = no known use. */
+&porta {
+	gpio-line-names =
+		"JTAG_TMS", "JTAG_TCK", "JTAG_TDI", "JTAG_TDO",		/*  0- 3 [MAP, DS] */
+		"JTAG_RST_N", "ALPU_SCL", "ALPU_SDA", "FD6818_CLK",	/*  4- 7 */
+		"FD6818_DATA", "GPS_TX_TO_UART1_RXD", "UART1_TXD_PAD_LOW", "",	/*  8-11 */
+		"", "", "", "LCD_BACKLIGHT_PWM0",			/* 12-15 */
+		"POWER_SWITCH_SENSE", "POWER_HOLD", "DATA_FLASH_CS_N", "",	/* 16-19 */
+		"SPI0_SCLK", "SPI0_MOSI", "SPI0_MISO", "SPI1_CSN0",	/* 20-23 */
+		"FD6818_CS_N", "FM_SDA", "FM_SCL", "",			/* 24-27 */
+		"", "", "", "";						/* 28-31 */
+};
+
+&portb {
+	gpio-line-names =
+		"LED_RED", "LED_GREEN", "LNA_VHF_EN", "PA_UHF_EN",	/*  0- 3 */
+		"LNA_UHF_EN", "", "ENCODER_B", "ENCODER_A",		/*  4- 7 */
+		"KEYPAD_BACKLIGHT", "", "", "PTT_N",			/*  8-11 */
+		"GPS_POWER_N", "", "AUDIO_MIC_SEL", "AUDIO_DEST_SEL",	/* 12-15 */
+		"", "KEY_ROW0", "KEY_ROW1", "KEY_ROW2_SK1",		/* 16-19 */
+		"KEY_ROW3_SK2", "AUDIO_PA_EN", "", "PA_VHF_EN",		/* 20-23 */
+		"", "", "FD6818_GPIO1", "FD6818_GPIO0",			/* 24-27 */
+		"", "", "", "";						/* 28-31 */
+};
+
+&portc {
+	gpio-line-names =
+		"CLK_OUT_PLLA", "", "LCD_RESET_N", "LCD_CS",		/*  0- 3 */
+		"LCD_RS", "LCD_WR", "LCD_RD", "LCD_DB0_KEY_COL0",	/*  4- 7 */
+		"LCD_DB1_KEY_COL1", "LCD_DB2_KEY_COL2", "LCD_DB3_KEY_COL3", "LCD_DB4_KEY_COL4",	/* 8-11 */
+		"LCD_DB5", "LCD_DB6", "LCD_DB7", "",			/* 12-15 */
+		"ADC1_IN", "ADC2_IN_VBAT", "", "",			/* 16-19 */
+		"", "", "", "",						/* 20-23 */
+		"DAC_VOUT_B", "DAC_VOUT_C", "", "",			/* 24-27 */
+		"", "", "", "";						/* 28-31 */
+};

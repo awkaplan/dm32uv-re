@@ -1,0 +1,63 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>peripheral-gpio — DM-32UV</title><style>
+:root{--bg:#fbfbfd;--fg:#1a1a1f;--mut:#63636b;--line:#e2e2e8;--card:#fff;
+--ok:#0a7d4a;--okbg:#e6f5ec;--st:#9a6400;--stbg:#fdf2dc;--raw:#6a6a75;--rawbg:#eeeef2;--acc:#1c5fd6}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#111116;--fg:#ececf1;--mut:#9a9aa6;
+--line:#2a2a33;--card:#1a1a21;--ok:#5cd39a;--okbg:#0f2e21;--st:#e8b552;--stbg:#33270d;--raw:#9a9aa6;
+--rawbg:#24242c;--acc:#7aa7ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:0 16px 72px}
+header{border-bottom:1px solid var(--line);margin-bottom:28px;padding:28px 0 20px}
+h1{margin:0 0 6px;font-size:25px;letter-spacing:-.02em}
+h2{font-size:18px;margin:34px 0 12px}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+.sub{color:var(--mut);font-size:14px;margin:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px;margin:22px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card .n{font-size:26px;font-weight:650;letter-spacing:-.02em}
+.card .l{color:var(--mut);font-size:12.5px;margin-top:3px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em;
+position:sticky;top:0;background:var(--bg);cursor:pointer;user-select:none}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+.b{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap}
+.CONFIRMED{color:var(--ok);background:var(--okbg)}
+.STRUCTURAL{color:var(--st);background:var(--stbg)}
+.RAW{color:var(--raw);background:var(--rawbg)}
+.bar{display:flex;height:7px;border-radius:4px;overflow:hidden;background:var(--rawbg);margin:5px 0 0}
+.bar i{display:block}
+input[type=search]{width:100%;padding:9px 12px;border:1px solid var(--line);border-radius:9px;
+background:var(--card);color:var(--fg);font-size:14px;margin:14px 0}
+.note{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--st);
+border-radius:0 8px 8px 0;padding:12px 15px;margin:18px 0;font-size:13.5px;color:var(--mut)}
+.note b{color:var(--fg)}
+footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);color:var(--mut);font-size:12.5px}
+</style></head><body><div class="wrap">
+<header><h1><a href="../index.html" style="color:inherit">DM-32UV firmware</a></h1>
+<p class="sub">Reverse-engineering reference &mdash; generated, not hand-written</p></header>
+<h2><code>peripheral-gpio</code></h2>
+<p class="sub">17 functions &middot; 2500 bytes</p><div class="bar"><i style="width:58.82%;background:var(--ok)"></i><i style="width:41.18%;background:var(--st)"></i></div>
+
+<input type="search" placeholder="Filter functions&hellip;">
+<table><thead><tr><th>Address</th><th>Function</th><th>Size</th><th>Callers</th><th>Callees</th>
+<th>Confidence</th><th>Assigned by</th></tr></thead><tbody><tr><td><code>0x0002c544</code></td><td><code>gpio_clear_output_bit</code></td><td data-v="68">68</td><td data-v="52">52</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0301d184</code></td><td><code>gpio_pin_set_output_level</code></td><td data-v="240">240</td><td data-v="14">14</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x0002c588</code></td><td><code>gpio_read_input_bit</code></td><td data-v="80">80</td><td data-v="7">7</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0002c5d8</code></td><td><code>gpio_interrupt_disable_bit</code></td><td data-v="68">68</td><td data-v="5">5</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0300c3cc</code></td><td><code>gpio_clear_bit0_wrapper</code></td><td data-v="8">8</td><td data-v="2">2</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x030135d8</code></td><td><code>gpio_portb_read_input_bits_17_to_20</code></td><td data-v="12">12</td><td data-v="2">2</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0002c61c</code></td><td><code>gpio_interrupt_enable_bit_with_polarity</code></td><td data-v="188">188</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x03001124</code></td><td><code>gpio_drv_set_output</code></td><td data-v="248">248</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x0300121c</code></td><td><code>gpio_pin_configure</code></td><td data-v="916">916</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x030015b0</code></td><td><code>gpio_pin_read</code></td><td data-v="80">80</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x03001600</code></td><td><code>board_gpio_init</code></td><td data-v="138">138</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b CONFIRMED">CONFIRMED</span></td><td><code>rule</code></td></tr><tr><td><code>0x03003c3c</code></td><td><code>gpio_set_output_bit_variant2</code></td><td data-v="68">68</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x03003c80</code></td><td><code>gpio_clear_output_bit_variant2</code></td><td data-v="68">68</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x0301d4c8</code></td><td><code>gpio_interrupt_enable_bit</code></td><td data-v="68">68</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x0301d50c</code></td><td><code>board_gpio_defaults_and_encoder_irq_arm</code></td><td data-v="208">208</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x0301d830</code></td><td><code>gpio_clear_bit0</code></td><td data-v="12">12</td><td data-v="1">1</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr><tr><td><code>0x03029420</code></td><td><code>gpio_clear_bit0_if_flag_clear</code></td><td data-v="30">30</td><td data-v="0">0</td><td data-v="0">0</td><td><span class="b STRUCTURAL">STRUCTURAL</span></td><td><code>rule</code></td></tr></tbody></table>
+<footer>Generated output. Every figure here is derived from the decompiled corpus; none of it
+is hand-maintained. Confidence markers are load-bearing &mdash; read them before relying on
+anything.</footer>
+</div><script>
+function mkSort(t){[...t.tHead.rows[0].cells].forEach((th,i)=>{th.onclick=()=>{
+ const tb=t.tBodies[0],rows=[...tb.rows],asc=th.dataset.a!=='1';
+ [...t.tHead.rows[0].cells].forEach(c=>c.dataset.a='');th.dataset.a=asc?'1':'0';
+ rows.sort((x,y)=>{const a=x.cells[i].dataset.v??x.cells[i].innerText,b=y.cells[i].dataset.v??y.cells[i].innerText;
+ const na=parseFloat(a),nb=parseFloat(b);
+ return (!isNaN(na)&&!isNaN(nb))?(asc?na-nb:nb-na):(asc?String(a).localeCompare(b):String(b).localeCompare(a));});
+ rows.forEach(r=>tb.appendChild(r));};});}
+function mkFilter(inp,t){inp.oninput=()=>{const q=inp.value.toLowerCase();
+ [...t.tBodies[0].rows].forEach(r=>{r.style.display=r.innerText.toLowerCase().includes(q)?'':'none';});};}
+
+document.querySelectorAll('table').forEach(mkSort);
+const s=document.querySelector('input[type=search]');if(s)mkFilter(s,document.querySelector('table'));
+</script></body></html>
